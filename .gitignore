@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.idea/
+.vscode/
+.env
+.venv/
+outputs/
+checkpoints/
+data/generated/
+*.pt
+*.pth
+*.ckpt
