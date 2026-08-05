@@ -39,6 +39,33 @@ snapshots
 - 稳健门槛要求同时超过原始 Root-MUSIC 和最佳固定尺度 FBSS Root-MUSIC，并提高近间隔分辨率且不增加失败。
 - SubspaceNet、DA-MUSIC、DeepMUSIC 用于投稿强度比较；无法按同一协议复现时必须记录原因。
 
+## Agent 与用户运行分工
+
+Agent 负责：
+
+- 按 TDD 执行每项 RED -> GREEN -> 重构，并亲自确认 RED 原因正确；
+- 运行目标单元测试、必要的完整 `unittest` 工程测试、`compileall`、默认 dry-run 和 4 样本 smoke；
+- 在每个 Task 后审查代码、测试、配置、数据范围、防覆盖和 Git diff；
+- 不运行正式模型训练，不访问或运行 locked test，不用 development/validation 反复搜索超参数；
+- 每个 Task 完成后报告改动、验证证据、注意事项和下一步计划。
+
+用户负责：
+
+- 运行正式 40,000 样本模型训练和后续正式训练 seed；
+- 在模型、损失和阈值冻结且单独批准后，运行最终 locked test；
+- 审核正式训练结果并批准是否进入优化、多 seed 或投稿强度对比。
+
+“最终测试由用户运行”特指最终 locked test/论文最终评价；不妨碍 Agent 运行实现所需的单元测试、完整工程测试、compileall、dry-run 和极小样本 smoke。
+
+## Git 与远程同步
+
+- 本项目远程仓库固定为 `https://github.com/ProLin520/-PC-NSS.git`，本地 remote 名称使用 `origin`。
+- 每个完成并验证的 Task 使用独立、范围明确的提交，并同步到当前实现分支；不使用整目录无审查暂存。
+- 推送前必须运行相应验证并检查 `git diff --cached --name-only`；禁止 force push，除非用户另行明确批准。
+- 只同步本项目源码、测试、配置和文档；不得提交或推送 `outputs/`、checkpoint、权重、生成数据、`.env`、密钥、Token、Cookie 或证书。
+- 不把 `DIO_DOA`、`Graduation` 或其他项目中的未提交改动带入本仓库。
+- 实施计划优先在 `codex/` 前缀的隔离分支/工作树进行；完成基础框架并经用户审核后再决定如何合并到默认分支。
+
 ## 工程规则
 
 - 按 TDD 执行 RED -> GREEN -> 重构。
