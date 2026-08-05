@@ -27,6 +27,7 @@ class PCNSSLossBreakdown:
     weighted_dominance: torch.Tensor
     scale_distribution: torch.Tensor
     predicted_resolution_score: torch.Tensor
+    best_fixed_resolution_score: torch.Tensor
 
 
 def aggregate_scale_weights(
@@ -190,4 +191,5 @@ def pcnss_loss(
         weighted_dominance=weighted_dominance,
         scale_distribution=distribution,
         predicted_resolution_score=predicted_score,
+        best_fixed_resolution_score=best_score,
     )
