@@ -23,7 +23,10 @@ from multisource_doa.data.dataset import PCNSSDataset
 from multisource_doa.data.manifest import build_split_manifest, write_split_manifest
 from multisource_doa.data.simulator import generate_two_source_sample
 from multisource_doa.evaluation.reporting import write_evaluation_report
-from multisource_doa.evaluation.runner import evaluate_samples
+from multisource_doa.evaluation.runner import (
+    DEFAULT_INFERENCE_BATCH_SIZE,
+    evaluate_samples,
+)
 from multisource_doa.models.pc_nss import MultiScalePCNSS
 from multisource_doa.physics.lags import build_multiscale_views
 from multisource_doa.training.artifacts import CheckpointManager, prepare_run_directory
@@ -42,6 +45,7 @@ RUN_CONFIG = {
     "device": "cpu",
     "checkpoint_path": "",
     "selected_best_fbss_scale": None,
+    "evaluation_batch_size": DEFAULT_INFERENCE_BATCH_SIZE,
 }
 
 STAGES = (
@@ -305,6 +309,9 @@ def run_formal_evaluation(values: dict, split: SplitName) -> dict:
         split=split,
         device=device,
         selected_best_fbss_scale=values.get("selected_best_fbss_scale"),
+        inference_batch_size=int(
+            values.get("evaluation_batch_size", config.training.batch_size)
+        ),
     )
     report_name = (
         "validation_report" if split is SplitName.VALIDATION else "development_report"

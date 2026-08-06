@@ -1,8 +1,11 @@
+import inspect
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from multisource_doa.baselines.registry import (
@@ -12,6 +15,7 @@ from multisource_doa.baselines.registry import (
 from multisource_doa.config import ExperimentConfig, SplitName
 from multisource_doa.data.simulator import generate_two_source_sample
 from multisource_doa.evaluation.reporting import write_evaluation_report
+import multisource_doa.evaluation.runner as runner_module
 from multisource_doa.evaluation.runner import evaluate_samples
 from multisource_doa.models.pc_nss import MultiScalePCNSS
 
@@ -59,6 +63,52 @@ class EvaluationRunnerTest(unittest.TestCase):
         self.assertIn(result.best_fixed_fbss_scale, (4, 5, 6, 7))
         self.assertEqual(len(result.predictions), 4 * len(expected))
         self.assertFalse(any("oracle" in row["algorithm"] for row in result.predictions))
+        self.assertEqual(result.runtime_seconds["pcnss_inference_batch_size"], 128)
+        self.assertIn("both_angle_errors_within_1_deg", result.predictions[0])
+        self.assertIn(
+            "estimated_separation_at_least_half_true",
+            result.predictions[0],
+        )
+
+    def test_evaluator_defaults_to_checkpoint_validation_batch_size(self):
+        parameter = inspect.signature(evaluate_samples).parameters[
+            "inference_batch_size"
+        ]
+
+        self.assertEqual(parameter.default, 128)
+
+    def test_neural_covariances_are_consistent_across_batch_sizes(self):
+        samples = _samples()
+        model = MultiScalePCNSS().eval()
+
+        batch_one, _ = runner_module._infer_pcnss_covariances(
+            samples,
+            model,
+            torch.device("cpu"),
+            batch_size=1,
+        )
+        batch_four, _ = runner_module._infer_pcnss_covariances(
+            samples,
+            model,
+            torch.device("cpu"),
+            batch_size=4,
+        )
+
+        np.testing.assert_allclose(
+            batch_one,
+            batch_four,
+            rtol=1e-5,
+            atol=2e-6,
+        )
+
+    def test_cuda_timing_synchronizes_but_cpu_path_does_not(self):
+        with mock.patch.object(torch.cuda, "synchronize") as synchronize:
+            runner_module._synchronize_if_cuda(torch.device("cpu"))
+            synchronize.assert_not_called()
+
+            cuda_device = torch.device("cuda:0")
+            runner_module._synchronize_if_cuda(cuda_device)
+            synchronize.assert_called_once_with(cuda_device)
 
     def test_development_does_not_select_a_new_best_scale(self):
         result = evaluate_samples(
@@ -108,8 +158,14 @@ class EvaluationRunnerTest(unittest.TestCase):
             }
             self.assertEqual({path.name for path in output.iterdir()}, expected_files)
             summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["report_schema_version"], 2)
             self.assertTrue(summary["framework_validation"])
             self.assertEqual(summary["research_acceptance"], "not_run")
+            self.assertEqual(summary["near_separation_audit"]["separation_bin"], "[2,4)")
+            self.assertEqual(
+                set(summary["near_separation_audit"]["algorithms"]),
+                set(result.summaries),
+            )
             with self.assertRaises(FileExistsError):
                 write_evaluation_report(
                     result,

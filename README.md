@@ -31,10 +31,14 @@ D:\Python\Python\python.exe
     "stage": "dry_run",
     "dry_run": True,
     "sample_count": 4,
+    "evaluation_batch_size": 128,
     "allow_locked_test": False,
     "overwrite": False,
 }
 ```
+
+正式评价的神经推理默认固定为 `batch_size=128`，与 checkpoint validation
+一致；该值会写入 `run_config.json` 和 `runtime_summary.json` 供审计。
 
 建议顺序：
 

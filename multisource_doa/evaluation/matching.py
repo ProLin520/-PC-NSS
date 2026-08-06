@@ -88,13 +88,30 @@ def hungarian_match(
 
 
 def is_resolved(match: MatchResult, true_angles) -> bool:
+    components = resolution_components(match, true_angles)
+    return bool(
+        components["both_angle_errors_within_1_deg"]
+        and components["estimated_separation_at_least_half_true"]
+    )
+
+
+def resolution_components(match: MatchResult, true_angles) -> dict[str, bool]:
+    """Return the two independently auditable parts of the resolution rule."""
+
     truth = np.sort(_validate_true_angles(true_angles))
     if not match.success or not np.isfinite(match.estimated_angles_deg).all():
-        return False
+        return {
+            "both_angle_errors_within_1_deg": False,
+            "estimated_separation_at_least_half_true": False,
+        }
     estimated = np.sort(match.estimated_angles_deg)
     true_separation = float(truth[1] - truth[0])
     estimated_separation = float(estimated[1] - estimated[0])
-    return bool(
-        np.all(match.absolute_errors_deg <= 1.0)
-        and estimated_separation >= 0.5 * true_separation
-    )
+    return {
+        "both_angle_errors_within_1_deg": bool(
+            np.all(match.absolute_errors_deg <= 1.0)
+        ),
+        "estimated_separation_at_least_half_true": bool(
+            estimated_separation >= 0.5 * true_separation
+        ),
+    }

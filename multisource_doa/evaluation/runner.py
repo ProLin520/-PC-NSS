@@ -16,7 +16,9 @@ from multisource_doa.baselines.classical import (
 from multisource_doa.config import SplitName
 from multisource_doa.data.simulator import DOASample
 from multisource_doa.evaluation.metrics import (
+    NEAR_SEPARATION_BIN,
     SampleScore,
+    aggregate_near_separation_audit,
     aggregate_metrics,
     paired_comparison,
     score_doa_sample,
@@ -36,28 +38,66 @@ class EvaluationRunResult:
     scores_by_algorithm: dict[str, tuple[SampleScore, ...]]
     best_fixed_fbss_scale: int | None
     paired_comparisons: dict[str, dict]
-    runtime_seconds: dict[str, float]
+    near_separation_audit: dict
+    runtime_seconds: dict[str, float | int]
+
+
+DEFAULT_INFERENCE_BATCH_SIZE = 128
+
+
+def _synchronize_if_cuda(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _infer_pcnss_covariances(
+    samples: list[DOASample],
+    model: MultiScalePCNSS,
+    device: torch.device,
+    *,
+    batch_size: int = DEFAULT_INFERENCE_BATCH_SIZE,
+) -> tuple[np.ndarray, float]:
+    if (
+        isinstance(batch_size, bool)
+        or int(batch_size) != batch_size
+        or batch_size <= 0
+    ):
+        raise ValueError("batch_size must be a positive integer")
+    model.eval()
+    covariance_batches = []
+    neural_runtime = 0.0
+    with torch.no_grad():
+        for start in range(0, len(samples), int(batch_size)):
+            batch = collate_samples(samples[start : start + int(batch_size)])
+            _synchronize_if_cuda(device)
+            started = perf_counter()
+            output = model(
+                batch.raw_lags_ri.to(device),
+                batch.fbss_lags_ri.to(device),
+                batch.valid_mask.to(device),
+                batch.effective_counts.to(device),
+                batch.quality_features.to(device),
+            )
+            _synchronize_if_cuda(device)
+            neural_runtime += perf_counter() - started
+            covariance_batches.append(output.covariance.detach().cpu().numpy())
+    return np.concatenate(covariance_batches, axis=0), neural_runtime
 
 
 def _pcnss_estimates(
     samples: list[DOASample],
     model: MultiScalePCNSS,
     device: torch.device,
+    inference_batch_size: int,
 ) -> tuple[list[DOAEstimate], float]:
-    batch = collate_samples(samples)
-    model.eval()
-    started = perf_counter()
-    with torch.no_grad():
-        output = model(
-            batch.raw_lags_ri.to(device),
-            batch.fbss_lags_ri.to(device),
-            batch.valid_mask.to(device),
-            batch.effective_counts.to(device),
-            batch.quality_features.to(device),
-        )
-    neural_runtime = perf_counter() - started
+    covariances, neural_runtime = _infer_pcnss_covariances(
+        samples,
+        model,
+        device,
+        batch_size=inference_batch_size,
+    )
     estimates = []
-    for covariance in output.covariance.detach().cpu().numpy():
+    for covariance in covariances:
         item_started = perf_counter()
         projection = dykstra_structured_projection(covariance)
         if projection.converged:
@@ -113,6 +153,10 @@ def _prediction_row(
         "absolute_error_2_deg": float(errors[1]),
         "sample_rmspe_deg": score.sample_rmspe_deg,
         "success": score.success,
+        "both_angle_errors_within_1_deg": score.both_angle_errors_within_1_deg,
+        "estimated_separation_at_least_half_true": (
+            score.estimated_separation_at_least_half_true
+        ),
         "resolved": score.resolved,
         "failure_reason": score.failure_reason or "",
         "rho": sample.rho,
@@ -130,6 +174,7 @@ def evaluate_samples(
     split: SplitName,
     device: torch.device,
     selected_best_fbss_scale: int | None = None,
+    inference_batch_size: int = DEFAULT_INFERENCE_BATCH_SIZE,
 ) -> EvaluationRunResult:
     split_name = SplitName(split)
     if split_name is SplitName.LOCKED_TEST:
@@ -138,7 +183,12 @@ def evaluate_samples(
         raise PermissionError("evaluation runner accepts validation/development only")
     if not samples:
         raise ValueError("at least one sample is required")
-    pcnss, neural_runtime = _pcnss_estimates(samples, model.to(device), device)
+    pcnss, neural_runtime = _pcnss_estimates(
+        samples,
+        model.to(device),
+        device,
+        inference_batch_size,
+    )
     estimates_by_algorithm: dict[str, list[DOAEstimate]] = {}
     classical_started = perf_counter()
     for sample in samples:
@@ -208,6 +258,13 @@ def evaluate_samples(
             scores_by_algorithm[f"fbss_root_music_L{best_scale}"],
             scores_by_algorithm["pcnss_root_music"],
         )
+    near_audit = {
+        "separation_bin": NEAR_SEPARATION_BIN,
+        "algorithms": {
+            algorithm: aggregate_near_separation_audit(scores)
+            for algorithm, scores in scores_by_algorithm.items()
+        },
+    }
     return EvaluationRunResult(
         split=split_name,
         summaries=summaries,
@@ -215,9 +272,11 @@ def evaluate_samples(
         scores_by_algorithm=scores_by_algorithm,
         best_fixed_fbss_scale=best_scale,
         paired_comparisons=paired,
+        near_separation_audit=near_audit,
         runtime_seconds={
             "classical_total": classical_runtime,
             "pcnss_neural_total": neural_runtime,
+            "pcnss_inference_batch_size": int(inference_batch_size),
             "overall_total": classical_runtime
             + sum(item.runtime_seconds for item in pcnss),
         },

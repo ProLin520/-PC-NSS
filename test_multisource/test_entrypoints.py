@@ -18,6 +18,7 @@ class EntrypointTest(unittest.TestCase):
         self.assertEqual(config["sample_count"], 4)
         self.assertFalse(config["allow_locked_test"])
         self.assertFalse(config["overwrite"])
+        self.assertEqual(config["evaluation_batch_size"], 128)
         self.assertNotIn("evaluate_locked_test", namespace["STAGES"])
 
     def test_stage_parser_rejects_combined_stage_string(self):
