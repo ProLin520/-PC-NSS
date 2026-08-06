@@ -343,6 +343,43 @@ class NearResolutionMechanismTest(unittest.TestCase):
         self.assertFalse(model.training)
         self.assertTrue(all(row["threshold_cohort"] == "resolved" for row in result.sample_rows))
 
+    def test_diagnose_near_samples_uses_frozen_residual_limit(self):
+        config = ExperimentConfig()
+        sample = generate_two_source_sample(
+            config,
+            split_seed=950,
+            index=0,
+            rho=1.0,
+            snr_db=5.0,
+            snapshot_count=20,
+            center_deg=0.0,
+            separation_deg=3.0,
+        )
+        label = NearAuditLabel(
+            sample_seed=sample.sample_seed,
+            rho=sample.rho,
+            snr_db=sample.snr_db,
+            snapshot_count=sample.snapshot_count,
+            separation_deg=3.0,
+            pcnss_row={},
+            fbss_l7_row={},
+            threshold_cohort="resolved",
+        )
+        model = MultiScalePCNSS(residual_fraction=0.08)
+        with torch.no_grad():
+            model.residual_head[-1].weight.zero_()
+            model.residual_head[-1].bias.copy_(torch.tensor([10.0, 0.0]))
+
+        result = near_resolution.diagnose_near_samples(
+            [sample],
+            {sample.sample_seed: label},
+            model,
+            device=torch.device("cpu"),
+            batch_size=1,
+        )
+
+        self.assertEqual(result.sample_rows[0]["saturated_lag_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

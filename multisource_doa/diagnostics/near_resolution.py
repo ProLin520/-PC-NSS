@@ -23,6 +23,7 @@ from multisource_doa.training.losses import aggregate_scale_weights
 
 ERROR_THRESHOLDS_DEG = (0.50, 0.75, 1.00, 1.25, 1.50, 2.00)
 EXPECTED_EVALUATOR_CODE_SHA = "129c3ba3b9fc1919451eef5c67376f04b4b24680"
+RESIDUAL_LIMIT = 0.10
 
 _SCALE_SIZES = (4, 5, 6, 7)
 
@@ -231,7 +232,7 @@ def diagnose_near_samples(
             )
             residual_rows = residual_diagnostics(
                 output.lag_residual_ri,
-                residual_limit=model.residual_fraction,
+                residual_limit=RESIDUAL_LIMIT,
             )
             projection_rows = projection_diagnostics(
                 output.candidate_covariance.detach().cpu().numpy(),
