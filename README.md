@@ -49,6 +49,17 @@ D:\Python\Python\python.exe
 
 每次 `stage` 只能是一个完整字符串，不能写成 `"train evaluate_development"`。基础阶段没有 `evaluate_locked_test` 入口。
 
+## 近间隔只读诊断
+
+直接运行 `scripts/diagnose_pcnss_near_resolution.py` 默认只做 CPU `dry_run`，不会读取
+checkpoint、`audit_v4` 或创建输出目录。正式诊断必须通过 `--config path.json` 显式设置
+`stage="diagnose_validation_near"` 和 `dry_run=false`；它只接受既有 `audit_v4` 的
+validation schema-v2 报告、对应冻结 checkpoint，以及由配对审计确定的近间隔样本。
+
+神经推理 batch 固定默认 `128`，可在 JSON 配置中显式调整。诊断输出写入新的目录并默认
+拒绝覆盖，`outputs/` 和诊断结果不提交到 Git。此诊断只用于解释冻结结果，不构成训练、
+重新训练或访问 development/locked test 的授权。
+
 ## 运行分工
 
 - Agent：RED/GREEN、目标及完整工程单测、`compileall`、默认 dry-run、4 样本 smoke。
