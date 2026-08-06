@@ -4,13 +4,27 @@ import csv
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping, Sequence
+
+import numpy as np
+import torch
+
+from multisource_doa.data.simulator import DOASample
+from multisource_doa.models.pc_nss import MultiScalePCNSS
+from multisource_doa.physics.projection import (
+    ProjectionResult,
+    dykstra_structured_projection,
+)
+from multisource_doa.training.engine import PCNSSBatch, collate_samples
+from multisource_doa.training.losses import aggregate_scale_weights
 
 
 ERROR_THRESHOLDS_DEG = (0.50, 0.75, 1.00, 1.25, 1.50, 2.00)
 EXPECTED_EVALUATOR_CODE_SHA = "129c3ba3b9fc1919451eef5c67376f04b4b24680"
+
+_SCALE_SIZES = (4, 5, 6, 7)
 
 _PCNSS_ALGORITHM = "pcnss_root_music"
 _FBSS_L7_ALGORITHM = "fbss_root_music_L7"
@@ -51,6 +65,243 @@ class NearAuditSelection:
     labels: tuple[NearAuditLabel, ...]
     source_manifest: dict[str, Any]
     input_sha256: dict[str, str]
+
+
+@dataclass(frozen=True)
+class NearDiagnosticResult:
+    sample_rows: tuple[dict[str, Any], ...]
+
+
+def scale_weight_diagnostics(
+    scale_weights: torch.Tensor,
+    valid_mask: torch.Tensor,
+    effective_counts: torch.Tensor,
+) -> tuple[dict[str, Any], ...]:
+    """Compute reliable scale mass and entropy for each frozen sample."""
+
+    distribution = aggregate_scale_weights(
+        scale_weights,
+        valid_mask,
+        effective_counts,
+    )
+    rows: list[dict[str, Any]] = []
+    for weights, mask, probabilities in zip(
+        scale_weights.detach().cpu(),
+        valid_mask.detach().cpu().bool(),
+        distribution.detach().cpu(),
+        strict=True,
+    ):
+        entropy = -torch.sum(
+            probabilities.clamp_min(1e-12) * probabilities.clamp_min(1e-12).log()
+        ) / math.log(len(_SCALE_SIZES))
+        dominant_index = int(torch.argmax(probabilities).item())
+        row: dict[str, Any] = {
+            f"p_L{size}": float(probabilities[index].item())
+            for index, size in enumerate(_SCALE_SIZES)
+        }
+        row["scale_entropy_normalized"] = float(entropy.item())
+        row["dominant_scale"] = _SCALE_SIZES[dominant_index]
+        lag_entropies: list[float | None] = []
+        for lag in range(weights.shape[-1]):
+            valid_indices = mask[:, lag]
+            valid_count = int(valid_indices.sum().item())
+            for index, size in enumerate(_SCALE_SIZES):
+                if bool(mask[index, lag]):
+                    row[f"scale_weight_L{size}_lag{lag}"] = float(
+                        weights[index, lag].item()
+                    )
+            if valid_count < 2:
+                lag_entropies.append(None)
+                continue
+            lag_probabilities = weights[:, lag][valid_indices]
+            lag_probabilities = lag_probabilities / lag_probabilities.sum().clamp_min(1e-12)
+            lag_entropy = -torch.sum(
+                lag_probabilities.clamp_min(1e-12)
+                * lag_probabilities.clamp_min(1e-12).log()
+            ) / math.log(valid_count)
+            lag_entropies.append(float(lag_entropy.item()))
+        row["lag_entropy_normalized"] = tuple(lag_entropies)
+        rows.append(row)
+    return tuple(rows)
+
+
+def residual_diagnostics(
+    lag_residual_ri: torch.Tensor,
+    *,
+    residual_limit: float,
+) -> tuple[dict[str, Any], ...]:
+    """Summarize bounded lag residual magnitude and saturation per sample."""
+
+    if lag_residual_ri.ndim != 3 or lag_residual_ri.shape[-1] != 2:
+        raise ValueError("lag_residual_ri must have shape [batch, lag, real_imag]")
+    if residual_limit <= 0.0:
+        raise ValueError("residual_limit must be positive")
+    magnitudes = torch.linalg.vector_norm(lag_residual_ri.detach().cpu(), dim=-1)
+    saturated = magnitudes / residual_limit >= 0.95
+    rows: list[dict[str, Any]] = []
+    for magnitude, is_saturated in zip(magnitudes, saturated, strict=True):
+        row = {
+            "residual_magnitude_p50": float(torch.quantile(magnitude, 0.50).item()),
+            "residual_magnitude_p95": float(torch.quantile(magnitude, 0.95).item()),
+            "residual_magnitude_max": float(magnitude.max().item()),
+            "saturated_lag_count": int(is_saturated.sum().item()),
+            "saturated_lag_rate": float(is_saturated.float().mean().item()),
+            "lag_residual_mean": tuple(float(value) for value in magnitude.tolist()),
+            "lag_residual_p95": tuple(float(value) for value in magnitude.tolist()),
+            "lag_saturated_rate": tuple(
+                float(value) for value in is_saturated.to(torch.float32).tolist()
+            ),
+        }
+        rows.append(row)
+    return tuple(rows)
+
+
+def projection_diagnostics(
+    candidate_covariances: np.ndarray,
+    train_projected_covariances: np.ndarray,
+    *,
+    projection_fn: Callable[[np.ndarray], ProjectionResult] = dykstra_structured_projection,
+) -> tuple[dict[str, Any], ...]:
+    """Measure the train and evaluation structural projections separately."""
+
+    rows = []
+    for candidate, train_projected in zip(
+        candidate_covariances,
+        train_projected_covariances,
+        strict=True,
+    ):
+        final = projection_fn(train_projected)
+        candidate_norm = max(float(np.linalg.norm(candidate, ord="fro")), 1e-12)
+        train_norm = max(float(np.linalg.norm(train_projected, ord="fro")), 1e-12)
+        rows.append(
+            {
+                "train_projection_change": float(
+                    np.linalg.norm(train_projected - candidate, ord="fro")
+                    / candidate_norm
+                ),
+                "eval_projection_change": float(
+                    np.linalg.norm(final.matrix - train_projected, ord="fro")
+                    / train_norm
+                ),
+                "total_projection_change": float(
+                    np.linalg.norm(final.matrix - candidate, ord="fro")
+                    / candidate_norm
+                ),
+                "dykstra_converged": bool(final.converged),
+                "dykstra_iterations": int(final.iterations),
+                "final_hermitian_error": float(final.hermitian_error),
+                "final_toeplitz_error": float(final.toeplitz_error),
+                "final_trace_error": float(final.trace_error),
+                "final_min_eigenvalue": float(final.min_eigenvalue),
+            }
+        )
+    return tuple(rows)
+
+
+def diagnose_near_samples(
+    samples: Sequence[DOASample],
+    labels_by_seed: Mapping[int, NearAuditLabel],
+    model: MultiScalePCNSS,
+    *,
+    device: torch.device,
+    batch_size: int,
+) -> NearDiagnosticResult:
+    """Run frozen forward diagnostics and join authority labels by sample seed."""
+
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    _require_unique_sample_seeds(samples)
+    model.eval()
+    rows: list[dict[str, Any]] = []
+    with torch.no_grad():
+        for start in range(0, len(samples), batch_size):
+            sample_batch = list(samples[start : start + batch_size])
+            batch = _batch_to_device(collate_samples(sample_batch), device)
+            output = model(
+                batch.raw_lags_ri,
+                batch.fbss_lags_ri,
+                batch.valid_mask,
+                batch.effective_counts,
+                batch.quality_features,
+            )
+            scale_rows = scale_weight_diagnostics(
+                output.scale_weights,
+                batch.valid_mask,
+                batch.effective_counts,
+            )
+            residual_rows = residual_diagnostics(
+                output.lag_residual_ri,
+                residual_limit=model.residual_fraction,
+            )
+            projection_rows = projection_diagnostics(
+                output.candidate_covariance.detach().cpu().numpy(),
+                output.covariance.detach().cpu().numpy(),
+            )
+            for sample, scale_row, residual_row, projection_row in zip(
+                sample_batch,
+                scale_rows,
+                residual_rows,
+                projection_rows,
+                strict=True,
+            ):
+                try:
+                    label = labels_by_seed[sample.sample_seed]
+                except KeyError as error:
+                    raise ValueError(
+                        f"missing authority label for sample_seed {sample.sample_seed}"
+                    ) from error
+                _validate_label_metadata(sample, label)
+                rows.append(
+                    {
+                        **label.pcnss_row,
+                        "sample_seed": sample.sample_seed,
+                        "true_angle_1_deg": float(sample.angles_deg[0]),
+                        "true_angle_2_deg": float(sample.angles_deg[1]),
+                        "rho": float(sample.rho),
+                        "snr_db": float(sample.snr_db),
+                        "snapshot_count": int(sample.snapshot_count),
+                        "separation_deg": float(abs(np.diff(sample.angles_deg)[0])),
+                        "threshold_cohort": label.threshold_cohort,
+                        **scale_row,
+                        **residual_row,
+                        **projection_row,
+                    }
+                )
+    return NearDiagnosticResult(sample_rows=tuple(rows))
+
+
+def _batch_to_device(batch: PCNSSBatch, device: torch.device) -> PCNSSBatch:
+    values: dict[str, Any] = {}
+    for item in fields(batch):
+        value = getattr(batch, item.name)
+        if isinstance(value, torch.Tensor):
+            values[item.name] = value.to(device)
+        elif isinstance(value, dict):
+            values[item.name] = {key: tensor.to(device) for key, tensor in value.items()}
+        else:
+            values[item.name] = value
+    return PCNSSBatch(**values)
+
+
+def _require_unique_sample_seeds(samples: Sequence[DOASample]) -> None:
+    seeds = [sample.sample_seed for sample in samples]
+    if len(seeds) != len(set(seeds)):
+        raise ValueError("samples contain duplicate sample_seed values")
+
+
+def _validate_label_metadata(sample: DOASample, label: NearAuditLabel) -> None:
+    if (
+        sample.rho != label.rho
+        or sample.snr_db != label.snr_db
+        or sample.snapshot_count != label.snapshot_count
+        or not math.isclose(
+            float(abs(np.diff(sample.angles_deg)[0])),
+            label.separation_deg,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        raise ValueError(f"metadata mismatch for sample_seed {sample.sample_seed}")
 
 
 def classify_threshold_cohort(

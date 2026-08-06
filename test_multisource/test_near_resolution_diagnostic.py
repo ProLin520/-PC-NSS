@@ -5,12 +5,22 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+import torch
+
+from multisource_doa.config import ExperimentConfig
+from multisource_doa.data.simulator import generate_two_source_sample
+from multisource_doa.diagnostics import near_resolution
 from multisource_doa.diagnostics.near_resolution import (
     EXPECTED_EVALUATOR_CODE_SHA,
+    NearAuditLabel,
     build_threshold_summary,
     classify_threshold_cohort,
     load_near_audit,
 )
+from multisource_doa.models.pc_nss import MultiScalePCNSS
+from multisource_doa.physics.projection import ProjectionResult
+from multisource_doa.training.losses import aggregate_scale_weights
 
 
 class NearResolutionThresholdTest(unittest.TestCase):
@@ -200,6 +210,138 @@ class NearAuditLoadTest(unittest.TestCase):
             selection = load_near_audit(report, checkpoint, expected_near_count=2)
 
         self.assertEqual([label.sample_seed for label in selection.labels], [7001, 7002])
+
+
+class NearResolutionMechanismTest(unittest.TestCase):
+    def test_scale_entropy_normalization(self):
+        weights = torch.tensor(
+            [
+                [
+                    [0.25, 0.0, 0.0],
+                    [0.25, 1.0, 0.0],
+                    [0.25, 0.0, 0.0],
+                    [0.25, 0.0, 1.0],
+                ]
+            ]
+        )
+        valid_mask = torch.tensor(
+            [
+                [
+                    [True, False, True],
+                    [True, True, True],
+                    [True, False, True],
+                    [True, False, True],
+                ]
+            ]
+        )
+        effective_counts = torch.tensor(
+            [
+                [
+                    [4.0, 0.0, 0.0],
+                    [2.0, 0.5, 0.0],
+                    [4.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.5],
+                ]
+            ]
+        )
+
+        metrics = near_resolution.scale_weight_diagnostics(
+            weights, valid_mask, effective_counts
+        )
+        expected = aggregate_scale_weights(weights, valid_mask, effective_counts)
+
+        self.assertAlmostEqual(metrics[0]["scale_entropy_normalized"], 1.0, places=6)
+        self.assertIsNone(metrics[0]["lag_entropy_normalized"][1])
+        self.assertEqual(metrics[0]["dominant_scale"], 4)
+        np.testing.assert_allclose(
+            [metrics[0][f"p_L{size}"] for size in (4, 5, 6, 7)],
+            expected[0].numpy(),
+        )
+
+    def test_residual_saturation_boundary(self):
+        residual = torch.tensor([[[0.094999, 0.0], [0.095, 0.0], [0.10, 0.0]]])
+
+        metrics = near_resolution.residual_diagnostics(residual, residual_limit=0.10)
+
+        self.assertEqual(metrics[0]["saturated_lag_count"], 2)
+        self.assertAlmostEqual(metrics[0]["saturated_lag_rate"], 2 / 3)
+
+    def test_projection_changes_keep_nonconverged_rows(self):
+        candidate = np.asarray([[[1.0, 0.0], [0.0, 1.0]]], dtype=np.complex128)
+        train_projected = np.asarray([[[2.0, 0.0], [0.0, 2.0]]], dtype=np.complex128)
+        final = np.asarray([[4.0, 0.0], [0.0, 4.0]], dtype=np.complex128)
+
+        metrics = near_resolution.projection_diagnostics(
+            candidate,
+            train_projected,
+            projection_fn=lambda _: ProjectionResult(
+                matrix=final,
+                converged=False,
+                iterations=9,
+                hermitian_error=0.1,
+                toeplitz_error=0.2,
+                trace_error=0.3,
+                min_eigenvalue=-0.4,
+            ),
+        )
+
+        self.assertEqual(len(metrics), 1)
+        self.assertAlmostEqual(metrics[0]["train_projection_change"], 1.0)
+        self.assertAlmostEqual(metrics[0]["eval_projection_change"], 1.0)
+        self.assertAlmostEqual(metrics[0]["total_projection_change"], 3.0)
+        self.assertFalse(metrics[0]["dykstra_converged"])
+
+    def test_diagnose_near_samples_preserves_order_and_joins_labels(self):
+        config = ExperimentConfig()
+        samples = [
+            generate_two_source_sample(
+                config,
+                split_seed=901,
+                index=index,
+                rho=1.0,
+                snr_db=5.0,
+                snapshot_count=20,
+                center_deg=float(index),
+                separation_deg=3.0,
+            )
+            for index in range(4)
+        ]
+        labels_by_seed = {
+            sample.sample_seed: NearAuditLabel(
+                sample_seed=sample.sample_seed,
+                rho=sample.rho,
+                snr_db=sample.snr_db,
+                snapshot_count=sample.snapshot_count,
+                separation_deg=3.0,
+                pcnss_row={
+                    "absolute_error_1_deg": 0.5,
+                    "absolute_error_2_deg": 0.75,
+                    "success": True,
+                },
+                fbss_l7_row={},
+                threshold_cohort="resolved",
+            )
+            for sample in samples
+        }
+        model = MultiScalePCNSS()
+        model.train()
+
+        result = near_resolution.diagnose_near_samples(
+            samples,
+            labels_by_seed,
+            model,
+            device=torch.device("cpu"),
+            batch_size=2,
+        )
+
+        self.assertEqual(len(result.sample_rows), 4)
+        self.assertEqual(
+            [row["sample_seed"] for row in result.sample_rows],
+            [sample.sample_seed for sample in samples],
+        )
+        self.assertEqual({row["sample_seed"] for row in result.sample_rows}, set(labels_by_seed))
+        self.assertFalse(model.training)
+        self.assertTrue(all(row["threshold_cohort"] == "resolved" for row in result.sample_rows))
 
 
 if __name__ == "__main__":
