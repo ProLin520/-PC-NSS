@@ -8,7 +8,7 @@
 
 ## 输入身份与完整性
 
-诊断使用冻结的 validation 子集；未读取、未运行 development 或 locked test，未训练、未重跑正式诊断。Task 6 文档阶段未新增、修改或覆盖 `outputs/`；Task 5 已生成并保留下文列出的六个只读诊断输出。
+诊断使用冻结的 validation 子集；未读取、未运行 development 或 locked test，未训练、未重跑正式诊断。Task 6 文档阶段未新增、修改或覆盖 `outputs/`；后续审查修复仅新增下文说明的派生重聚合目录，未覆盖、修改或删除原始诊断目录。Task 5 已生成并保留下文列出的六个只读诊断输出。
 
 | 项目 | 值 |
 | --- | --- |
@@ -23,6 +23,14 @@
 源报告文件 SHA256：`run_config.json` `bbebfc5a0238bfb593c8806bb8aa3dff67c391bd93b5f760c1a6180e88bb27b5`；`summary.json` `adcfc37ef2ef315af35ccaa76f2025d05cd0e8a9877c3485bf95e585766fb724`；`source_manifest.json` `eecf03d1a7a561814057831aad96d667d592993f749966175b25e24a2b6d5e46`；`predictions.csv` `eb91eb1bba8f9b26f06f2dac921b4ed208745187d83ad02aaa667c3aa379eb90`。
 
 本次六个诊断输出 SHA256：`diagnostic_config.json` `70f32aaa3a0b1abb3955b4e0127a32ec2e58de72c7c4211a99e7546d73058355`；`source_manifest.json` `fe0674cc24f1c31bf21dd7660c41a48d617cc3754094090cd71ba223e3ed9131`；`near_sample_diagnostics.csv` `e1ed4bd0571dbb31923262e18409fc5cf00b1c425f2a2520b88caf9cc2bb8d54`；`threshold_summary.json` `c9bdde41b47bd0ccbca6b5db0cd9bf3d51655f586af2e333bb90febe10f2a9c3`；`stratified_summary.csv` `8286bd48ae58cb4fca83457c68c1faa9f2361ddc1a6933a1f6301cd5d0e9ab62`；`mechanism_summary.json` `b44854798309c23c6dfb1e5b8beed1f97d7af4adb11b02242842bf5e1af54602`。
+
+### schema-complete 派生重聚合（无模型前向）
+
+上列原始诊断输出由 `106e83a7ff263e91e759bce2127d04ac9c3e8891` 生成；其样本 CSV 未包含使 L=7 六档阈值和 RMSPE 配对结果可自包含复算的 `l7_*` 权威字段。为补全审计 schema，后续仅从既有 `near_sample_diagnostics.csv` 和同一份已认证 `audit_v4` 预测产物按 `sample_seed` 连接 L=7 权威字段，写入全新的派生目录 `outputs/pcnss_near_resolution_seed2026_audit_v4_schema_complete`。该操作不加载模型、不执行前向、不训练、不改变原始 1270 行的机制字段，也不覆盖原目录。
+
+派生输出记录 `stage=reaggregate_existing_near_diagnostic`、`no_model_forward=true`、`batch_size=128`；来源 manifest 同时记录原诊断六文件 SHA、audit 四个输入 SHA、checkpoint SHA、原诊断代码 SHA 与重聚合代码 SHA `d6c96c60a7ac22138b2afac6a07a389b16da7080`。独立逐 seed 审计确认全部 1270 个旧机制行保持一致，PC-NSS 六档阈值仍为 `9/23/49/95/136/267`，L=7 六档阈值为 `28/60/91/125/158/232`，且以 PC-NSS 为 candidate、L=7 为 reference 的 RMSPE win/tie/loss 仍为 `919/0/351`。
+
+派生六文件 SHA256：`diagnostic_config.json` `018bb1e7f46feab75bc585dd0f9d3f7f000f0b1da91e0a50402acaef9e334989`；`source_manifest.json` `69e10a60f80b55d6afd81eae016c5cfbc6734da9527e8ccadb4c809c35544ab7`；`near_sample_diagnostics.csv` `22f3b971d5e46e0f04697c0ca52013441d5c73e51ebe22db2125c16262c4ec93`；`threshold_summary.json` `5cec65b8a17f272ab70881a14a02540a3e3d59f4144592e620cbf0a6f19325eb`；`stratified_summary.csv` `8286bd48ae58cb4fca83457c68c1faa9f2361ddc1a6933a1f6301cd5d0e9ab62`；`mechanism_summary.json` `b44854798309c23c6dfb1e5b8beed1f97d7af4adb11b02242842bf5e1af54602`。
 
 ## 最大角误差累计通过率
 
