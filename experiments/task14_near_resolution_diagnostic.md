@@ -8,7 +8,7 @@
 
 ## 输入身份与完整性
 
-诊断使用冻结的 validation 子集；未读取、未运行 development 或 locked test，未训练、未重跑正式诊断，也未修改 `outputs/`。
+诊断使用冻结的 validation 子集；未读取、未运行 development 或 locked test，未训练、未重跑正式诊断。Task 6 文档阶段未新增、修改或覆盖 `outputs/`；Task 5 已生成并保留下文列出的六个只读诊断输出。
 
 | 项目 | 值 |
 | --- | --- |
