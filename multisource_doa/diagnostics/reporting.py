@@ -27,6 +27,7 @@ THRESHOLD_COHORTS = (
     "far_miss_gt_2",
 )
 DIAGNOSTIC_SCHEMA_VERSION = 1
+PAIRED_RMSPE_TIE_TOLERANCE_DEG = 1e-6
 
 MECHANISM_METRICS = (
     "scale_entropy_normalized",
@@ -139,8 +140,28 @@ def write_near_diagnostic_report(
 def _build_threshold_summary(sample_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     for row in sample_rows:
         _validate_sample_row(row)
+    summary = _algorithm_threshold_summary(sample_rows, prefix="")
+    resolved_count = sum(row["threshold_cohort"] == "resolved" for row in sample_rows)
+    summary["resolved"] = {
+        "count": resolved_count,
+        "rate": _rate(resolved_count, len(sample_rows)),
+    }
+    summary["algorithms"] = {
+        "pcnss_root_music": _algorithm_threshold_summary(sample_rows, prefix=""),
+        "fbss_root_music_L7": _algorithm_threshold_summary(sample_rows, prefix="l7_"),
+    }
+    summary["paired_comparison"] = _paired_rmspe_comparison(sample_rows)
+    return summary
+
+
+def _algorithm_threshold_summary(
+    sample_rows: Sequence[Mapping[str, Any]], *, prefix: str
+) -> dict[str, Any]:
     maximum_errors = [
-        max(float(row["absolute_error_1_deg"]), float(row["absolute_error_2_deg"]))
+        max(
+            _finite_float(row[f"{prefix}absolute_error_1_deg"], "absolute error"),
+            _finite_float(row[f"{prefix}absolute_error_2_deg"], "absolute error"),
+        )
         for row in sample_rows
     ]
     sample_count = len(sample_rows)
@@ -151,12 +172,33 @@ def _build_threshold_summary(sample_rows: Sequence[Mapping[str, Any]]) -> dict[s
             "count": count,
             "rate": _rate(count, sample_count),
         }
-    resolved_count = sum(row["threshold_cohort"] == "resolved" for row in sample_rows)
-    summary["resolved"] = {
-        "count": resolved_count,
-        "rate": _rate(resolved_count, sample_count),
-    }
     return summary
+
+
+def _paired_rmspe_comparison(sample_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    counts = {"win": 0, "tie": 0, "loss": 0}
+    for row in sample_rows:
+        pcnss_rmspe = _finite_float(row["sample_rmspe_deg"], "sample_rmspe_deg")
+        l7_rmspe = _finite_float(row["l7_sample_rmspe_deg"], "l7_sample_rmspe_deg")
+        difference = pcnss_rmspe - l7_rmspe
+        if abs(difference) <= PAIRED_RMSPE_TIE_TOLERANCE_DEG:
+            counts["tie"] += 1
+        elif difference < 0.0:
+            counts["win"] += 1
+        else:
+            counts["loss"] += 1
+    sample_count = len(sample_rows)
+    return {
+        "metric": "sample_rmspe_deg",
+        "candidate_algorithm": "pcnss_root_music",
+        "reference_algorithm": "fbss_root_music_L7",
+        "tie_tolerance_deg": PAIRED_RMSPE_TIE_TOLERANCE_DEG,
+        "sample_count": sample_count,
+        **{
+            outcome: {"count": count, "rate": _rate(count, sample_count)}
+            for outcome, count in counts.items()
+        },
+    }
 
 
 def _stratum_summary(
@@ -218,6 +260,10 @@ def _validate_sample_row(row: Mapping[str, Any]) -> None:
         "snr_db",
         "absolute_error_1_deg",
         "absolute_error_2_deg",
+        "sample_rmspe_deg",
+        "l7_absolute_error_1_deg",
+        "l7_absolute_error_2_deg",
+        "l7_sample_rmspe_deg",
         *_SCALE_METRICS,
         *MECHANISM_METRICS,
     ):
@@ -226,6 +272,14 @@ def _validate_sample_row(row: Mapping[str, Any]) -> None:
     _snr_bin(_required_field(row, "snr_db"))
     _snapshot_bin(_required_field(row, "snapshot_count"))
     _cohort_bin(_required_field(row, "threshold_cohort"))
+    for field in (
+        "success",
+        "estimated_separation_at_least_half_true",
+        "l7_success",
+        "l7_estimated_separation_at_least_half_true",
+    ):
+        if not isinstance(_required_field(row, field), bool):
+            raise ValueError(f"{field} must be bool")
     if _required_field(row, "dominant_scale") not in (4, 5, 6, 7):
         raise ValueError("dominant_scale must be one of 4, 5, 6, 7")
 

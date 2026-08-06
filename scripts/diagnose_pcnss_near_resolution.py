@@ -44,12 +44,18 @@ RUN_CONFIG = {
 }
 
 STAGES = ("dry_run", "diagnose_validation_near")
+FROZEN_BATCH_SIZE = 128
 
 
 def validate_stage(stage: str) -> str:
     if not isinstance(stage, str) or stage not in STAGES:
         raise ValueError(f"stage must be one of {STAGES}")
     return stage
+
+
+def _require_frozen_batch_size(values: dict[str, Any]) -> None:
+    if values.get("batch_size") != FROZEN_BATCH_SIZE:
+        raise ValueError(f"batch_size must be fixed at {FROZEN_BATCH_SIZE}")
 
 
 def _device(values: dict[str, Any]) -> torch.device:
@@ -104,6 +110,7 @@ def _refuse_existing_output(values: dict[str, Any]) -> None:
 def run_dry_run(values: dict[str, Any]) -> dict[str, Any]:
     """Validate the safe invocation path without reading artifacts or writing output."""
 
+    _require_frozen_batch_size(values)
     if values.get("allow_locked_test", False):
         raise PermissionError("dry-run cannot enable locked_test")
     if values.get("split") != "validation":
@@ -113,13 +120,14 @@ def run_dry_run(values: dict[str, Any]) -> dict[str, Any]:
         "locked_test_access": False,
         "output_created": False,
         "device": str(_device(values)),
-        "batch_size": int(values["batch_size"]),
+        "batch_size": FROZEN_BATCH_SIZE,
     }
 
 
 def run_diagnostic(values: dict[str, Any]) -> dict[str, Any]:
     """Diagnose only audit-selected validation samples from a frozen checkpoint."""
 
+    _require_frozen_batch_size(values)
     if values.get("dry_run", True):
         raise ValueError("正式诊断前必须把 dry_run 改为 False")
     if values.get("split") != "validation":
@@ -158,7 +166,7 @@ def run_diagnostic(values: dict[str, Any]) -> dict[str, Any]:
         labels_by_seed,
         model,
         device=device,
-        batch_size=int(values["batch_size"]),
+        batch_size=FROZEN_BATCH_SIZE,
     )
     report = write_near_diagnostic_report(
         result,
@@ -172,7 +180,7 @@ def run_diagnostic(values: dict[str, Any]) -> dict[str, Any]:
             "input_sha256": selection.input_sha256,
             "validation_split_seed": split_seed,
             "sample_count": len(selection.labels),
-            "batch_size": int(values["batch_size"]),
+            "batch_size": FROZEN_BATCH_SIZE,
             "device": str(device),
             "residual_limit": 0.10,
             "residual_saturation_threshold": 0.095,
@@ -198,7 +206,9 @@ def load_config(path: str | Path | None) -> dict[str, Any]:
     unknown_keys = set(loaded) - set(RUN_CONFIG)
     if unknown_keys:
         raise ValueError(f"unknown config keys: {sorted(unknown_keys)}")
-    return {**RUN_CONFIG, **loaded}
+    values = {**RUN_CONFIG, **loaded}
+    _require_frozen_batch_size(values)
+    return values
 
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:

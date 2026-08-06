@@ -42,6 +42,7 @@ _FLOAT_FIELDS = (
     "true_angle_2_deg",
     "absolute_error_1_deg",
     "absolute_error_2_deg",
+    "sample_rmspe_deg",
     "rho",
     "snr_db",
     "separation_deg",
@@ -255,6 +256,7 @@ def diagnose_near_samples(
                 rows.append(
                     {
                         **label.pcnss_row,
+                        **_l7_authority_fields(label.fbss_l7_row),
                         "sample_seed": sample.sample_seed,
                         "true_angle_1_deg": float(sample.angles_deg[0]),
                         "true_angle_2_deg": float(sample.angles_deg[1]),
@@ -269,6 +271,22 @@ def diagnose_near_samples(
                     }
                 )
     return NearDiagnosticResult(sample_rows=tuple(rows))
+
+
+def _l7_authority_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose the frozen L7 labels needed to independently reproduce comparisons."""
+
+    return {
+        f"l7_{field}": row[field]
+        for field in (
+            "absolute_error_1_deg",
+            "absolute_error_2_deg",
+            "sample_rmspe_deg",
+            "success",
+            "estimated_separation_at_least_half_true",
+        )
+        if field in row
+    }
 
 
 def _batch_to_device(batch: PCNSSBatch, device: torch.device) -> PCNSSBatch:
@@ -353,6 +371,7 @@ def load_near_audit(
     *,
     expected_code_sha: str = EXPECTED_EVALUATOR_CODE_SHA,
     expected_near_count: int = 1270,
+    expected_source_count: int = 5000,
 ) -> NearAuditSelection:
     """Load and authenticate paired PC-NSS and L7 near-separation predictions."""
 
@@ -379,6 +398,7 @@ def load_near_audit(
         pcnss_rows,
         fbss_rows,
         expected_near_count=expected_near_count,
+        expected_source_count=expected_source_count,
     )
     return NearAuditSelection(
         labels=tuple(labels),
@@ -421,11 +441,17 @@ def _pair_and_validate_near_rows(
     fbss_rows: list[dict[str, Any]],
     *,
     expected_near_count: int,
+    expected_source_count: int,
 ) -> list[NearAuditLabel]:
     pcnss_by_seed = _index_rows_by_seed(pcnss_rows, _PCNSS_ALGORITHM)
     fbss_by_seed = _index_rows_by_seed(fbss_rows, _FBSS_L7_ALGORITHM)
     if pcnss_by_seed.keys() != fbss_by_seed.keys():
         raise ValueError("PC-NSS/L7 sample_seed sets do not match")
+    if len(pcnss_by_seed) != expected_source_count:
+        raise ValueError(
+            "source row count does not match expected_source_count: "
+            f"{len(pcnss_by_seed)} != {expected_source_count}"
+        )
 
     labels = []
     for sample_seed in sorted(pcnss_by_seed):

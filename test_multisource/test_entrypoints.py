@@ -78,11 +78,23 @@ class EntrypointTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
             path.write_text(json.dumps({"batch_size": 4}), encoding="utf-8")
-            self.assertEqual(namespace["load_config"](path)["batch_size"], 4)
+            with self.assertRaisesRegex(ValueError, "batch_size.*128"):
+                namespace["load_config"](path)
 
             path.write_text(json.dumps({"unexpected": True}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "unknown config keys"):
                 namespace["load_config"](path)
+
+    def test_near_resolution_direct_entrypoints_reject_non_frozen_batch_size(self):
+        namespace = runpy.run_path(str(DIAGNOSTIC_SCRIPT))
+        invalid = dict(namespace["RUN_CONFIG"], batch_size=4)
+
+        with self.assertRaisesRegex(ValueError, "batch_size.*128"):
+            namespace["run_dry_run"](invalid)
+        with self.assertRaisesRegex(ValueError, "batch_size.*128"):
+            namespace["run_diagnostic"](
+                dict(invalid, stage="diagnose_validation_near", dry_run=False)
+            )
 
     def test_near_resolution_cpu_smoke_writes_six_files_from_train_samples(self):
         config = ExperimentConfig()
@@ -109,12 +121,16 @@ class EntrypointTest(unittest.TestCase):
                 pcnss_row={
                     "absolute_error_1_deg": 0.5,
                     "absolute_error_2_deg": 0.75,
+                    "sample_rmspe_deg": 0.6373774391990981,
                     "success": True,
+                    "estimated_separation_at_least_half_true": True,
                 },
                 fbss_l7_row={
                     "absolute_error_1_deg": 0.6,
                     "absolute_error_2_deg": 0.8,
+                    "sample_rmspe_deg": 0.7071067811865476,
                     "success": True,
+                    "estimated_separation_at_least_half_true": True,
                 },
                 threshold_cohort="resolved",
             )

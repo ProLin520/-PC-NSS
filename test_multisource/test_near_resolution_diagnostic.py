@@ -107,6 +107,7 @@ class NearAuditLoadTest(unittest.TestCase):
             "true_angle_2_deg": 1.5,
             "absolute_error_1_deg": 0.5,
             "absolute_error_2_deg": 0.75,
+            "sample_rmspe_deg": 0.6373774391990981,
             "success": True,
             "estimated_separation_at_least_half_true": True,
             "rho": 1.0,
@@ -122,7 +123,12 @@ class NearAuditLoadTest(unittest.TestCase):
             report = Path(temporary_directory)
             checkpoint = self._write_report(report)
 
-            selection = load_near_audit(report, checkpoint, expected_near_count=1)
+            selection = load_near_audit(
+                report,
+                checkpoint,
+                expected_near_count=1,
+                expected_source_count=1,
+            )
 
         self.assertEqual(len(selection.labels), 1)
         self.assertEqual(selection.labels[0].sample_seed, 7001)
@@ -136,13 +142,23 @@ class NearAuditLoadTest(unittest.TestCase):
             report = Path(temporary_directory)
             checkpoint = self._write_report(report, code_sha="wrong")
             with self.assertRaisesRegex(ValueError, "code SHA"):
-                load_near_audit(report, checkpoint, expected_near_count=1)
+                load_near_audit(
+                    report,
+                    checkpoint,
+                    expected_near_count=1,
+                    expected_source_count=1,
+                )
 
             checkpoint = self._write_report(
                 report, checkpoint_sha="not the checkpoint hash"
             )
             with self.assertRaisesRegex(ValueError, "checkpoint SHA"):
-                load_near_audit(report, checkpoint, expected_near_count=1)
+                load_near_audit(
+                    report,
+                    checkpoint,
+                    expected_near_count=1,
+                    expected_source_count=1,
+                )
 
     def test_rejects_duplicate_seed_pair_set_and_metadata_mismatches(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -153,21 +169,36 @@ class NearAuditLoadTest(unittest.TestCase):
             ]
             checkpoint = self._write_report(report, pcnss_rows=duplicate_rows)
             with self.assertRaisesRegex(ValueError, "duplicate sample_seed"):
-                load_near_audit(report, checkpoint, expected_near_count=1)
+                load_near_audit(
+                    report,
+                    checkpoint,
+                    expected_near_count=1,
+                    expected_source_count=1,
+                )
 
             checkpoint = self._write_report(
                 report,
                 fbss_rows=[self._row("fbss_root_music_L7", sample_seed=7002)],
             )
             with self.assertRaisesRegex(ValueError, "sample_seed sets"):
-                load_near_audit(report, checkpoint, expected_near_count=1)
+                load_near_audit(
+                    report,
+                    checkpoint,
+                    expected_near_count=1,
+                    expected_source_count=1,
+                )
 
             checkpoint = self._write_report(
                 report,
                 fbss_rows=[self._row("fbss_root_music_L7", rho=0.9)],
             )
             with self.assertRaisesRegex(ValueError, "metadata mismatch"):
-                load_near_audit(report, checkpoint, expected_near_count=1)
+                load_near_audit(
+                    report,
+                    checkpoint,
+                    expected_near_count=1,
+                    expected_source_count=1,
+                )
 
     def test_rejects_non_near_rows_and_unexpected_near_count(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -178,7 +209,12 @@ class NearAuditLoadTest(unittest.TestCase):
                 fbss_rows=[self._row("fbss_root_music_L7", separation_deg=4.0)],
             )
             with self.assertRaisesRegex(ValueError, "expected_near_count"):
-                load_near_audit(report, checkpoint, expected_near_count=1)
+                load_near_audit(
+                    report,
+                    checkpoint,
+                    expected_near_count=1,
+                    expected_source_count=1,
+                )
 
     def test_rejects_non_validation_prediction_rows(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -207,9 +243,50 @@ class NearAuditLoadTest(unittest.TestCase):
                 ],
             )
 
-            selection = load_near_audit(report, checkpoint, expected_near_count=2)
+            selection = load_near_audit(
+                report,
+                checkpoint,
+                expected_near_count=2,
+                expected_source_count=2,
+            )
 
         self.assertEqual([label.sample_seed for label in selection.labels], [7001, 7002])
+
+    def test_rejects_1270_near_rows_when_3730_source_rows_are_missing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            report = Path(temporary_directory)
+            pcnss_rows = [
+                self._row("pcnss_root_music", sample_seed=7001 + index)
+                for index in range(1270)
+            ]
+            fbss_rows = [
+                self._row("fbss_root_music_L7", sample_seed=7001 + index)
+                for index in range(1270)
+            ]
+            checkpoint = self._write_report(
+                report,
+                pcnss_rows=pcnss_rows,
+                fbss_rows=fbss_rows,
+            )
+
+            with self.assertRaisesRegex(ValueError, "expected_source_count"):
+                load_near_audit(report, checkpoint, expected_near_count=1270)
+
+    def test_rejects_non_finite_sample_rmspe(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            report = Path(temporary_directory)
+            checkpoint = self._write_report(
+                report,
+                pcnss_rows=[self._row("pcnss_root_music", sample_rmspe_deg="nan")],
+            )
+
+            with self.assertRaisesRegex(ValueError, "invalid selected prediction row"):
+                load_near_audit(
+                    report,
+                    checkpoint,
+                    expected_near_count=1,
+                    expected_source_count=1,
+                )
 
 
 class NearResolutionMechanismTest(unittest.TestCase):
@@ -316,9 +393,16 @@ class NearResolutionMechanismTest(unittest.TestCase):
                 pcnss_row={
                     "absolute_error_1_deg": 0.5,
                     "absolute_error_2_deg": 0.75,
+                    "sample_rmspe_deg": 0.625,
                     "success": True,
                 },
-                fbss_l7_row={},
+                fbss_l7_row={
+                    "absolute_error_1_deg": 0.6,
+                    "absolute_error_2_deg": 0.8,
+                    "sample_rmspe_deg": 0.7,
+                    "success": True,
+                    "estimated_separation_at_least_half_true": True,
+                },
                 threshold_cohort="resolved",
             )
             for sample in samples
@@ -342,6 +426,13 @@ class NearResolutionMechanismTest(unittest.TestCase):
         self.assertEqual({row["sample_seed"] for row in result.sample_rows}, set(labels_by_seed))
         self.assertFalse(model.training)
         self.assertTrue(all(row["threshold_cohort"] == "resolved" for row in result.sample_rows))
+        self.assertEqual(result.sample_rows[0]["l7_absolute_error_1_deg"], 0.6)
+        self.assertEqual(result.sample_rows[0]["l7_absolute_error_2_deg"], 0.8)
+        self.assertEqual(result.sample_rows[0]["l7_sample_rmspe_deg"], 0.7)
+        self.assertTrue(result.sample_rows[0]["l7_success"])
+        self.assertTrue(
+            result.sample_rows[0]["l7_estimated_separation_at_least_half_true"]
+        )
 
     def test_diagnose_near_samples_uses_frozen_residual_limit(self):
         config = ExperimentConfig()

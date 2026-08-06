@@ -33,6 +33,14 @@ class DiagnosticReportingTest(unittest.TestCase):
             "threshold_cohort": threshold_cohort,
             "absolute_error_1_deg": 0.4,
             "absolute_error_2_deg": 0.6,
+            "sample_rmspe_deg": 0.5,
+            "success": True,
+            "estimated_separation_at_least_half_true": True,
+            "l7_absolute_error_1_deg": 0.5,
+            "l7_absolute_error_2_deg": 0.7,
+            "l7_sample_rmspe_deg": 0.6,
+            "l7_success": True,
+            "l7_estimated_separation_at_least_half_true": True,
             "p_L4": 0.4,
             "p_L5": 0.3,
             "p_L6": 0.2,
@@ -182,6 +190,32 @@ class DiagnosticReportingTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(overall["scale_entropy_normalized_mean"]), entropy_mean)
         self.assertAlmostEqual(float(overall["saturated_lag_rate"]), saturation_rate)
+        self.assertEqual(
+            threshold_summary["algorithms"]["pcnss_root_music"]
+            ["max_error_le_1p00_deg"]["count"],
+            max_error_passes,
+        )
+        self.assertEqual(
+            threshold_summary["algorithms"]["fbss_root_music_L7"]
+            ["max_error_le_1p00_deg"]["count"],
+            len(sample_rows),
+        )
+        self.assertEqual(
+            threshold_summary["paired_comparison"]["metric"],
+            "sample_rmspe_deg",
+        )
+        self.assertEqual(
+            threshold_summary["paired_comparison"]["candidate_algorithm"],
+            "pcnss_root_music",
+        )
+        self.assertEqual(
+            threshold_summary["paired_comparison"]["reference_algorithm"],
+            "fbss_root_music_L7",
+        )
+        self.assertEqual(
+            threshold_summary["paired_comparison"]["win"]["count"],
+            len(sample_rows),
+        )
 
 
 if __name__ == "__main__":
