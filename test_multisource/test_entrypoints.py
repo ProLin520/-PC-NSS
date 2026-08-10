@@ -42,6 +42,9 @@ ERROR_TEACHER_CACHE_SCRIPT = (
 SINGLE_FACTOR_AUDIT_SCRIPT = (
     PROJECT_ROOT / "scripts" / "audit_pcnss_teacher_single_factor.py"
 )
+TEACHER_EXPERIMENT_AUDIT_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "audit_pcnss_teacher_experiment.py"
+)
 
 
 class EntrypointTest(unittest.TestCase):
@@ -593,6 +596,34 @@ class SingleFactorAuditEntrypointTest(unittest.TestCase):
                 }
             )
             self.assertEqual(len(list(output.iterdir())), 3)
+            self.assertFalse(result["training_performed"])
+
+
+class TeacherExperimentAuditEntrypointTest(unittest.TestCase):
+    def test_default_is_read_free_and_output_free(self):
+        namespace = runpy.run_path(str(TEACHER_EXPERIMENT_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unused"
+            result = namespace["run_stage"]({**namespace["RUN_CONFIG"], "output_root": str(output)})
+            self.assertFalse(result["output_created"])
+            self.assertFalse(result["evaluation_performed"])
+            self.assertFalse(result["training_performed"])
+            self.assertFalse(output.exists())
+
+    def test_formal_requires_four_sources_and_safe_runtime(self):
+        namespace = runpy.run_path(str(TEACHER_EXPERIMENT_AUDIT_SCRIPT))
+        base = {**namespace["RUN_CONFIG"], "stage": "audit_validation_teacher_experiment", "dry_run": False}
+        with self.assertRaises(ValueError): namespace["run_stage"](base)
+        for update, error in (({"split": "development"}, PermissionError), ({"device": "cuda"}, ValueError), ({"allow_locked_test": True}, PermissionError), ({"overwrite": True}, ValueError)):
+            with self.subTest(update=update), self.assertRaises(error): namespace["_validate"]({**base, **update})
+
+    def test_smoke_writes_exact_five_files_without_model_work(self):
+        namespace = runpy.run_path(str(TEACHER_EXPERIMENT_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "audit"
+            result = namespace["run_stage"]({**namespace["RUN_CONFIG"], "stage": "smoke", "output_root": str(output)})
+            self.assertEqual(len(list(output.iterdir())), 5)
+            self.assertFalse(result["evaluation_performed"])
             self.assertFalse(result["training_performed"])
 
 
