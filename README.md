@@ -114,7 +114,28 @@ CPU，并拒绝覆盖或访问 locked test。只有所有数据、模型、check
 身份门同时通过时才允许复用旧物理基线，否则结论固定为重新运行物理 teacher 对照组；审计
 本身不授权或执行训练。
 
+## Task 17 训练与结果审计
+
+`scripts/run_multiscale_pcnss.py` 新增 `teacher_mode`、`teacher_cache_path` 和
+`single_factor_audit_path`。默认仍为 `teacher_mode="physical"` 且两个路径为空；候选组必须
+显式使用 `teacher_mode="failure_aware_error"`，并在创建输出、模型或优化器前通过 40,000
+行 train cache 与三文件单因素审计的身份检查。缓存标签只替换尺度 KL 目标，dominance 仍使用
+物理 MUSIC score。训练 manifest、checkpoint 和 validation 报告会连续记录 teacher 来源和
+SHA。Agent 只运行 4 样本单 batch smoke，正式 40,000 样本训练仍由用户运行。
+
+`scripts/audit_pcnss_teacher_experiment.py` 默认 `dry_run`，正式阶段只读 A/B 两份 schema-v2
+validation 报告、passing 单因素审计与对应 cache，不加载模型、不重新推理、不训练。结论要求
+六个冻结 gate 同时成立：候选组近间隔 resolution 高于原模型且不低于 L7，同时总体 RMSPE、
+总体 resolution、failure count 不退化，并且协议身份一致。即使 seed 2026 全部通过，也只允许
+申请 development 审批；不会自动授权 development、多 seed 或 locked test。
+
+正式执行顺序固定为：生成并审核 40,000 行 train-only cache；运行单因素身份审计；若要求重跑
+A，则先重新训练并评价 physical 对照组；随后只训练一次 seed 2026 候选组并评价 validation；
+最后运行结果审计。任何 gate 失败都停止，不在 validation 上调参或降低门槛。
+
 设计与实施文档：
 
 - `docs/superpowers/specs/2026-08-04-multiscale-pcnss-design.md`
 - `docs/superpowers/plans/2026-08-04-multiscale-pcnss-implementation.md`
+- `docs/superpowers/specs/2026-08-10-pcnss-train-failure-aware-scale-teacher-design.md`
+- `docs/superpowers/plans/2026-08-10-pcnss-train-failure-aware-scale-teacher-implementation.md`

@@ -97,8 +97,22 @@ def _load_report(directory: str | Path, expected_count: int) -> dict[str, Any]:
             "snapshot_count": int(raw["snapshot_count"]),
             "separation_deg": _finite(raw["separation_deg"], "separation_deg"),
             "success": _bool(raw["success"]),
+            "both_angle_errors_within_1_deg": _bool(
+                raw["both_angle_errors_within_1_deg"]
+            ),
+            "estimated_separation_at_least_half_true": _bool(
+                raw["estimated_separation_at_least_half_true"]
+            ),
             "resolved": _bool(raw["resolved"]),
         })
+        errors = (row["absolute_error_1_deg"], row["absolute_error_2_deg"])
+        if min(errors) < 0.0 or not math.isclose(
+            row["sample_rmspe_deg"],
+            math.sqrt(sum(error * error for error in errors) / 2.0),
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("prediction scoring fields are inconsistent")
         indexed[key] = row
     algorithms = {algorithm for algorithm, _ in indexed}
     if PCNSS not in algorithms or L7 not in algorithms:
@@ -173,8 +187,10 @@ def _protocol_identity(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
     a_seeds = {seed for name, seed in a["rows"] if name == PCNSS}
     b_seeds = {seed for name, seed in b["rows"] if name == PCNSS}
     l7_fields = (
-        "true_angle_1_deg", "true_angle_2_deg", "absolute_error_1_deg",
-        "absolute_error_2_deg", "sample_rmspe_deg", "success", "resolved",
+        "true_angle_1_deg", "true_angle_2_deg", "estimated_angle_1_deg",
+        "estimated_angle_2_deg", "absolute_error_1_deg", "absolute_error_2_deg",
+        "sample_rmspe_deg", "success", "both_angle_errors_within_1_deg",
+        "estimated_separation_at_least_half_true", "resolved",
         "rho", "snr_db", "snapshot_count", "separation_deg", "failure_reason",
     )
     l7_same = a_seeds == b_seeds and all(
