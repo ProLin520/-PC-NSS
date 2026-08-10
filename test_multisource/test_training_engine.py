@@ -6,10 +6,12 @@ from multisource_doa.config import ExperimentConfig, SplitName
 from multisource_doa.data.simulator import generate_two_source_sample
 from multisource_doa.models.pc_nss import MultiScalePCNSS
 from multisource_doa.training.engine import (
+    _batch_scale_target,
     collate_samples,
     train_one_epoch,
     validate_model,
 )
+from multisource_doa.training.teacher import build_scale_teacher
 
 
 def _samples(count=4):
@@ -28,6 +30,50 @@ def _samples(count=4):
 
 
 class TrainingEngineTest(unittest.TestCase):
+    def test_cached_targets_follow_batch_seed_order_and_missing_seed_fails(self):
+        batch = collate_samples(_samples())
+        lookup = {
+            seed: tuple(float(index == position) for index in range(4))
+            for position, seed in enumerate(reversed(batch.sample_seeds))
+        }
+        target = _batch_scale_target(batch, lookup, torch.device("cpu"))
+        self.assertEqual(target.shape, (4, 4))
+        self.assertEqual(tuple(target[0].tolist()), lookup[batch.sample_seeds[0]])
+        with self.assertRaises(KeyError):
+            _batch_scale_target(batch, {}, torch.device("cpu"))
+
+    def test_explicit_physical_targets_match_fallback_training_step(self):
+        batch = collate_samples(_samples())
+        teacher = build_scale_teacher(batch.fbss_covariances, batch.true_angles_deg)
+        lookup = {
+            seed: tuple(float(value) for value in teacher.scale_probabilities[index])
+            for index, seed in enumerate(batch.sample_seeds)
+        }
+        torch.manual_seed(2026)
+        fallback_model = MultiScalePCNSS()
+        explicit_model = MultiScalePCNSS()
+        explicit_model.load_state_dict(fallback_model.state_dict())
+        fallback_optimizer = torch.optim.Adam(fallback_model.parameters(), lr=1e-3)
+        explicit_optimizer = torch.optim.Adam(explicit_model.parameters(), lr=1e-3)
+
+        fallback = train_one_epoch(
+            fallback_model, [batch], fallback_optimizer, epoch=0,
+            device=torch.device("cpu"), split=SplitName.TRAIN,
+        )
+        explicit = train_one_epoch(
+            explicit_model, [batch], explicit_optimizer, epoch=0,
+            device=torch.device("cpu"), split=SplitName.TRAIN,
+            scale_targets_by_seed=lookup,
+        )
+
+        self.assertEqual(fallback.keys(), explicit.keys())
+        for key in fallback:
+            self.assertAlmostEqual(fallback[key], explicit[key], places=6)
+        for left, right in zip(
+            fallback_model.parameters(), explicit_model.parameters(), strict=True
+        ):
+            torch.testing.assert_close(left, right, atol=1e-7, rtol=1e-6)
+
     def test_collate_builds_all_model_supervision_and_audit_tensors(self):
         batch = collate_samples(_samples())
 
