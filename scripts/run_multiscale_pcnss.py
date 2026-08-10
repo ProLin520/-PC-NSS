@@ -31,18 +31,20 @@ from multisource_doa.training.engine import collate_samples, train_one_epoch, va
 
 
 RUN_CONFIG = {
-    "stage": "dry_run",
-    "dry_run": True,
+    "stage": "evaluate_validation",
+    "dry_run": False,
     "model_seed": 2026,
-    "split": "train",
+    "split": "validation",
     "sample_count": 4,
-    "output_root": "outputs/multiscale_pcnss_snap20",
+    "output_root": r"D:\Python\Project\doa_estimation\MultiSource_DOA\.worktrees\pcnss-foundation\scripts\outputs\multiscale_pcnss_snap20_seed2026_audit_v3",
+    "checkpoint_path": r"D:\Python\Project\doa_estimation\MultiSource_DOA\.worktrees\pcnss-foundation\scripts\outputs\multiscale_pcnss_snap20_seed2026\best.pt",
     "allow_locked_test": False,
     "overwrite": False,
-    "device": "cpu",
-    "checkpoint_path": "",
+    "device": "cuda",
     "selected_best_fbss_scale": None,
+    "evaluation_batch_size": 128,
 }
+
 
 STAGES = (
     "dry_run",
