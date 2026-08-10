@@ -46,6 +46,7 @@ CURRENT_TAU = 0.10
 COUNTERFACTUAL_TAU = 0.05
 ORACLE_TIE_TOLERANCE_DEG = 1e-6
 DIVERGENCE_EPSILON = 1e-8
+EXPECTED_EVALUATOR_CODE_SHA = "129c3ba3b9fc1919451eef5c67376f04b4b24680"
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,8 @@ def load_teacher_diagnostic_inputs(
     task14_manifest = _read_json(task14 / "source_manifest.json")
     _require_validation_schema_v2(run_config, summary)
     _require_task14_manifest(task14_manifest, expected_near_count)
+    if audit_manifest.get("code_sha") != EXPECTED_EVALUATOR_CODE_SHA:
+        raise ValueError("unexpected evaluator code SHA")
 
     audit_hashes = {
         name: _sha256(audit / name)

@@ -27,6 +27,7 @@ ALGORITHMS = (
     "fbss_root_music_L6",
     "fbss_root_music_L7",
 )
+EXPECTED_EVALUATOR_CODE_SHA = "129c3ba3b9fc1919451eef5c67376f04b4b24680"
 
 
 def _sha256(path: Path) -> str:
@@ -77,8 +78,13 @@ class TeacherInputAuthenticationTest(unittest.TestCase):
             json.dumps({"split": "validation", "report_schema_version": 2}),
             encoding="utf-8",
         )
+        evaluator_code_sha = (
+            "wrong" if mutation == "evaluator_code_sha" else EXPECTED_EVALUATOR_CODE_SHA
+        )
         (audit / "source_manifest.json").write_text(
-            json.dumps({"code_sha": "evaluator", "checkpoint_sha": "checkpoint"}),
+            json.dumps(
+                {"code_sha": evaluator_code_sha, "checkpoint_sha": "checkpoint"}
+            ),
             encoding="utf-8",
         )
         rows: list[dict[str, object]] = []
@@ -236,6 +242,15 @@ class TeacherInputAuthenticationTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
 
         with self.assertRaisesRegex(ValueError, "checkpoint SHA"):
+            load_teacher_diagnostic_inputs(
+                audit, task14, expected_source_count=2, expected_near_count=1
+            )
+
+    def test_rejects_unexpected_evaluator_code_even_when_source_hash_matches(self):
+        audit, task14, temporary = self._write_inputs("evaluator_code_sha")
+        self.addCleanup(temporary.cleanup)
+
+        with self.assertRaisesRegex(ValueError, "evaluator code SHA"):
             load_teacher_diagnostic_inputs(
                 audit, task14, expected_source_count=2, expected_near_count=1
             )
