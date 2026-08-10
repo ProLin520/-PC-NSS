@@ -86,6 +86,18 @@ failure-aware RMSPE 排序。它不加载 checkpoint、不运行神经模型、�
 文件，新目录存在时拒绝覆盖，且不得提交 `outputs/`。结论只决定下一项应研究标定、组成项抵消，
 还是 train-only 角误差 teacher；Task 16 本身不授权任何训练。
 
+## Train-only Failure-aware 角误差 Teacher Cache
+
+`scripts/build_pcnss_failure_aware_teacher_cache.py` 默认只运行 1 个 train 样本的
+CPU `dry_run`，不会创建输出、加载模型或读取 validation/development/locked test。
+`smoke` 固定使用前 4 个 train 样本并写三文件 cache；正式
+`build_train_teacher_cache` 固定为 train、CPU、batch size 128 和 40,000 样本，
+由用户在实现与 smoke 审核后运行。输出目录存在时拒绝覆盖。
+
+cache 记录 L4–L7 固定 FBSS + Root-MUSIC 的 failure-aware 匹配角 RMSPE，失败继续按
+60 度罚值，最优尺度在 `1e-6` 度容差内并列时均分概率。cache 属于生成实验数据，
+不得提交 Git；生成它不构成正式训练、development 或 locked test 授权。
+
 ## 运行分工
 
 - Agent：RED/GREEN、目标及完整工程单测、`compileall`、默认 dry-run、4 样本 smoke。
