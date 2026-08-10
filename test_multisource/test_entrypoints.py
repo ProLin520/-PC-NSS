@@ -22,6 +22,9 @@ DIAGNOSTIC_SCRIPT = PROJECT_ROOT / "scripts" / "diagnose_pcnss_near_resolution.p
 TEACHER_DIAGNOSTIC_SCRIPT = (
     PROJECT_ROOT / "scripts" / "diagnose_pcnss_teacher_confidence.py"
 )
+TEACHER_RANKING_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "diagnose_pcnss_teacher_ranking.py"
+)
 
 
 class EntrypointTest(unittest.TestCase):
@@ -317,6 +320,82 @@ class TeacherDiagnosticEntrypointTest(unittest.TestCase):
             )
             self.assertTrue(manifest["no_model_forward"])
             self.assertFalse(manifest["training_performed"])
+            self.assertNotIn("checkpoint_path", manifest)
+
+
+class TeacherRankingEntrypointTest(unittest.TestCase):
+    def test_default_dry_run_is_cpu_only_and_creates_nothing(self):
+        namespace = runpy.run_path(str(TEACHER_RANKING_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unused"
+            result = namespace["run_stage"](
+                {**namespace["RUN_CONFIG"], "output_root": str(output)}
+            )
+
+            self.assertEqual(result["stage"], "dry_run")
+            self.assertEqual(result["device"], "cpu")
+            self.assertEqual(result["batch_size"], 128)
+            self.assertTrue(result["no_model_forward"])
+            self.assertFalse(result["teacher_modified"])
+            self.assertFalse(result["training_performed"])
+            self.assertFalse(output.exists())
+
+    def test_unsafe_direct_values_and_unknown_json_keys_are_rejected(self):
+        namespace = runpy.run_path(str(TEACHER_RANKING_SCRIPT))
+        base = dict(namespace["RUN_CONFIG"])
+        for update, error_type, message in (
+            ({"device": "cuda"}, ValueError, "CPU"),
+            ({"batch_size": 4}, ValueError, "128"),
+            ({"split": "development"}, PermissionError, "validation"),
+            ({"allow_locked_test": True}, PermissionError, "locked_test"),
+            ({"overwrite": True}, ValueError, "overwrite"),
+        ):
+            with self.subTest(update=update):
+                with self.assertRaisesRegex(error_type, message):
+                    namespace["run_dry_run"]({**base, **update})
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"unexpected": True}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown config keys"):
+                namespace["load_config"](path)
+
+    def test_formal_path_rejects_dry_run_and_existing_output_before_reads(self):
+        namespace = runpy.run_path(str(TEACHER_RANKING_SCRIPT))
+        base = dict(
+            namespace["RUN_CONFIG"], stage="diagnose_validation_teacher_ranking"
+        )
+        with self.assertRaisesRegex(ValueError, "dry_run"):
+            namespace["run_diagnostic"](base)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "existing"
+            output.mkdir()
+            with self.assertRaises(FileExistsError):
+                namespace["run_diagnostic"](
+                    {**base, "dry_run": False, "output_root": str(output)}
+                )
+
+    def test_four_sample_smoke_uses_train_data_and_writes_eight_files(self):
+        namespace = runpy.run_path(str(TEACHER_RANKING_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "smoke"
+            result = namespace["run_smoke"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "stage": "smoke",
+                    "sample_count": 4,
+                    "output_root": str(output),
+                }
+            )
+
+            self.assertEqual(result["sample_count"], 4)
+            self.assertTrue(result["no_model_forward"])
+            self.assertFalse(result["teacher_modified"])
+            self.assertFalse(result["training_performed"])
+            self.assertEqual(len(list(output.iterdir())), 8)
+            manifest = json.loads(
+                (output / "source_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["source"], "temporary-train-smoke")
             self.assertNotIn("checkpoint_path", manifest)
 
 
