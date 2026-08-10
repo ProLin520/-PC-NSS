@@ -71,6 +71,35 @@ class ArtifactAuditTest(unittest.TestCase):
                     split=SplitName.LOCKED_TEST,
                 )
 
+    def test_checkpoint_optionally_records_teacher_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = MultiScalePCNSS()
+            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+            metadata = {
+                "teacher_mode": "failure_aware_error",
+                "scale_distillation_target_source": "train_only_failure_aware_rmspe",
+                "dominance_target_source": "physical_music_score",
+                "teacher_cache_sha256": "a" * 64,
+                "single_factor_audit_sha256": "b" * 64,
+            }
+            manager = CheckpointManager(Path(directory))
+            manager.update(
+                metric_value=1.0,
+                epoch=0,
+                model=model,
+                optimizer=optimizer,
+                experiment_config=ExperimentConfig(),
+                model_seed=2026,
+                data_split_seed=202_708_040,
+                code_sha="abc123",
+                split=SplitName.VALIDATION,
+                training_metadata=metadata,
+            )
+            payload = torch.load(
+                Path(directory) / "best.pt", map_location="cpu", weights_only=False
+            )
+            self.assertEqual(payload["training_metadata"], metadata)
+
 
 if __name__ == "__main__":
     unittest.main()

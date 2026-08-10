@@ -75,6 +75,10 @@ def _hashes(paths: Mapping[str, Path]) -> dict[str, str]:
     return {name: sha256_file(path) for name, path in paths.items()}
 
 
+def _without_training_metadata(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in manifest.items() if key != "training_metadata"}
+
+
 def audit_single_factor_inputs(
     *,
     baseline_training_directory: str | Path,
@@ -124,12 +128,31 @@ def audit_single_factor_inputs(
         "learning_rate": 1e-3,
         "physical_path_regression_version": PHYSICAL_PATH_REGRESSION_VERSION,
     }
+    current_physical_metadata = {
+        **environment_expected,
+        "teacher_mode": "physical",
+        "scale_distillation_target_source": "physical_music_score",
+        "dominance_target_source": "physical_music_score",
+        "teacher_cache_sha256": None,
+        "single_factor_audit_sha256": None,
+        "teacher_label_counts": None,
+    }
+    manifest_metadata = (
+        train_manifest.get("training_metadata"),
+        validation_manifest.get("training_metadata"),
+        report_manifest.get("training_metadata"),
+    )
     gates = {
         "task16_ranking_invalid": True,
         "same_data_identity": (
-            train_manifest == build_split_manifest(experiment_config, SplitName.TRAIN)
-            and validation_manifest
+            _without_training_metadata(train_manifest)
+            == build_split_manifest(experiment_config, SplitName.TRAIN)
+            and _without_training_metadata(validation_manifest)
             == build_split_manifest(experiment_config, SplitName.VALIDATION)
+        ),
+        "same_manifest_training_metadata": (
+            manifest_metadata == (None, None, None)
+            or manifest_metadata == (metadata, metadata, metadata)
         ),
         "same_model_seed": payload.get("model_seed") == 2026,
         "same_experiment_config": payload.get("experiment_config")
@@ -147,7 +170,8 @@ def audit_single_factor_inputs(
             and report_summary.get("split") == SplitName.VALIDATION.value
         ),
         "teacher_cache_valid": cache.manifest.get("train_only") is True,
-        "same_training_environment": metadata == environment_expected,
+        "same_training_environment": metadata
+        in (environment_expected, current_physical_metadata),
     }
     allowed = all(gates.values())
     source_sha = {

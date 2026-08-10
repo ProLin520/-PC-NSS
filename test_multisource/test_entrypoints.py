@@ -3,10 +3,12 @@ import runpy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
 from multisource_doa.config import ExperimentConfig, SplitName
+from multisource_doa.data.dataset import PCNSSDataset
 from multisource_doa.data.simulator import generate_two_source_sample
 from multisource_doa.diagnostics.near_resolution import (
     NearAuditLabel,
@@ -14,7 +16,15 @@ from multisource_doa.diagnostics.near_resolution import (
 )
 from multisource_doa.diagnostics.reporting import write_near_diagnostic_report
 from multisource_doa.models.pc_nss import MultiScalePCNSS
-from multisource_doa.training.teacher_cache import load_teacher_cache
+from multisource_doa.training.error_teacher import build_error_teacher_row
+from multisource_doa.training.single_factor_audit import SingleFactorAuditResult
+from multisource_doa.training.single_factor_reporting import (
+    write_single_factor_audit_report,
+)
+from multisource_doa.training.teacher_cache import (
+    load_teacher_cache,
+    write_teacher_cache,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -198,7 +208,87 @@ class EntrypointTest(unittest.TestCase):
         self.assertFalse(config["allow_locked_test"])
         self.assertFalse(config["overwrite"])
         self.assertEqual(config["evaluation_batch_size"], 128)
+        self.assertEqual(config["teacher_mode"], "physical")
+        self.assertEqual(config["teacher_cache_path"], "")
+        self.assertEqual(config["single_factor_audit_path"], "")
         self.assertNotIn("evaluate_locked_test", namespace["STAGES"])
+
+    def test_failure_aware_training_requires_inputs_before_model_creation(self):
+        namespace = runpy.run_path(str(RUN_SCRIPT))
+        values = dict(
+            namespace["RUN_CONFIG"],
+            stage="train",
+            dry_run=False,
+            teacher_mode="failure_aware_error",
+            teacher_cache_path="",
+            single_factor_audit_path="",
+            output_root="unused",
+        )
+        with mock.patch.object(
+            namespace["MultiScalePCNSS"], "__init__", side_effect=AssertionError
+        ):
+            with self.assertRaises(ValueError):
+                namespace["run_stage"](values)
+
+    def test_physical_teacher_rejects_ambiguous_cache_configuration(self):
+        namespace = runpy.run_path(str(RUN_SCRIPT))
+        with self.assertRaises(ValueError):
+            namespace["_load_teacher_training_context"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "teacher_cache_path": "unexpected",
+                },
+                ExperimentConfig(),
+                expected_count=4,
+            )
+
+    def test_failure_aware_smoke_consumes_authenticated_four_row_cache(self):
+        namespace = runpy.run_path(str(RUN_SCRIPT))
+        config = ExperimentConfig()
+        dataset = PCNSSDataset(SplitName.TRAIN, config)
+        rows = [
+            build_error_teacher_row(dataset[index], sample_index=index)
+            for index in range(4)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_directory = root / "cache"
+            write_teacher_cache(
+                rows,
+                cache_directory,
+                experiment_config=config,
+                run_config={"device": "cpu", "batch_size": 128},
+                code_sha="smoke",
+                source_sha256={"source.py": "a" * 64},
+                expected_count=4,
+            )
+            cache = load_teacher_cache(cache_directory, config, expected_count=4)
+            audit_directory = root / "audit"
+            write_single_factor_audit_report(
+                SingleFactorAuditResult(
+                    baseline_reuse_allowed=True,
+                    gates={"synthetic_smoke": True},
+                    evidence={"required_action": "reuse_baseline"},
+                    source_sha256={"teacher_cache": dict(cache.file_sha256)},
+                ),
+                audit_directory,
+                run_config={"stage": "smoke"},
+            )
+            result = namespace["run_smoke"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "stage": "smoke_train",
+                    "teacher_mode": "failure_aware_error",
+                    "teacher_cache_path": str(cache_directory),
+                    "single_factor_audit_path": str(audit_directory),
+                    "output_root": str(root / "training_smoke"),
+                }
+            )
+            self.assertEqual(
+                result["training_metadata"]["scale_distillation_target_source"],
+                "train_only_failure_aware_rmspe",
+            )
+            self.assertFalse(result["formal_checkpoint_written"])
 
     def test_stage_parser_rejects_combined_stage_string(self):
         namespace = runpy.run_path(str(RUN_SCRIPT))

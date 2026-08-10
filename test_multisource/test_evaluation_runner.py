@@ -142,7 +142,10 @@ class EvaluationRunnerTest(unittest.TestCase):
                 result,
                 output,
                 run_config={"dry_run": True},
-                source_manifest={"split": "validation"},
+                source_manifest={
+                    "split": "validation",
+                    "training_metadata": {"teacher_mode": "failure_aware_error"},
+                },
                 code_sha="abc123",
                 checkpoint_sha="not-a-formal-checkpoint",
             )
@@ -165,6 +168,13 @@ class EvaluationRunnerTest(unittest.TestCase):
             self.assertEqual(
                 set(summary["near_separation_audit"]["algorithms"]),
                 set(result.summaries),
+            )
+            manifest = json.loads(
+                (output / "source_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["training_metadata"]["teacher_mode"],
+                "failure_aware_error",
             )
             with self.assertRaises(FileExistsError):
                 write_evaluation_report(
