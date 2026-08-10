@@ -1,11 +1,21 @@
 import csv
 import hashlib
 import json
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+import torch
+
+from multisource_doa.config import ExperimentConfig
+from multisource_doa.data.simulator import generate_two_source_sample
 from multisource_doa.diagnostics.teacher_confidence import (
+    TeacherAuthorityLabel,
+    build_teacher_sample_row,
+    diagnose_teacher_samples,
+    distribution_metrics,
     load_teacher_diagnostic_inputs,
 )
 
@@ -256,6 +266,133 @@ class TeacherInputAuthenticationTest(unittest.TestCase):
             load_teacher_diagnostic_inputs(
                 audit, task14, expected_source_count=2, expected_near_count=1
             )
+
+
+class TeacherMetricTest(unittest.TestCase):
+    def _label(self, sample, *, probabilities=(0.25, 0.25, 0.25, 0.25)):
+        return TeacherAuthorityLabel(
+            sample_seed=sample.sample_seed,
+            true_angles_deg=tuple(float(value) for value in sample.angles_deg),
+            rho=float(sample.rho),
+            snr_db=float(sample.snr_db),
+            snapshot_count=int(sample.snapshot_count),
+            separation_deg=float(abs(np.diff(sample.angles_deg)[0])),
+            threshold_cohort="far_miss_gt_2",
+            student_probabilities=probabilities,
+            fixed_rmspe_deg={4: 1.0, 5: 1.0 + 5e-7, 6: 2.0, 7: 3.0},
+        )
+
+    def _samples(self):
+        config = ExperimentConfig()
+        return [
+            generate_two_source_sample(
+                config,
+                split_seed=901,
+                index=index,
+                rho=1.0,
+                snr_db=5.0,
+                snapshot_count=20,
+                center_deg=float(index),
+                separation_deg=3.0,
+            )
+            for index in range(4)
+        ]
+
+    def test_distribution_metrics_report_uniform_entropy_and_dominance(self):
+        metrics = distribution_metrics((0.25, 0.25, 0.25, 0.25))
+
+        self.assertAlmostEqual(metrics["entropy_normalized"], 1.0)
+        self.assertAlmostEqual(metrics["max_probability"], 0.25)
+        self.assertEqual(metrics["dominant_scale"], 4)
+
+    def test_distribution_metrics_reject_invalid_probability_vectors(self):
+        for probabilities in (
+            (0.4, 0.3, 0.2, 0.2),
+            (0.4, 0.3, 0.3, -0.0 - 0.1),
+            (0.4, 0.3, 0.2, float("nan")),
+        ):
+            with self.subTest(probabilities=probabilities):
+                with self.assertRaisesRegex(ValueError, "probabilities"):
+                    distribution_metrics(probabilities)
+
+    def test_sample_row_reports_oracle_tie_regret_margin_and_divergence(self):
+        sample = self._samples()[0]
+        row = build_teacher_sample_row(
+            self._label(sample),
+            scores=torch.tensor([0.4, 0.3, 0.2, 0.1]),
+            probabilities_current=torch.tensor([0.4, 0.3, 0.2, 0.1]),
+            probabilities_counterfactual=torch.tensor([0.7, 0.2, 0.08, 0.02]),
+            tau_current=0.10,
+        )
+
+        self.assertAlmostEqual(row["student_entropy_normalized"], 1.0)
+        self.assertEqual(row["oracle_best_scales"], (4, 5))
+        self.assertTrue(row["teacher_oracle_agreement"])
+        self.assertAlmostEqual(row["teacher_regret_deg"], 0.0)
+        self.assertAlmostEqual(row["teacher_score_margin"], 0.1, places=6)
+        self.assertAlmostEqual(row["teacher_score_margin_over_tau"], 1.0, places=6)
+        self.assertGreaterEqual(row["teacher_student_kl"], 0.0)
+        self.assertGreaterEqual(row["teacher_student_js"], 0.0)
+        self.assertEqual(row["teacher_dominant_scale"], 4)
+        self.assertEqual(row["student_dominant_scale"], 4)
+
+    def test_cpu_batches_preserve_seed_order_and_are_numerically_consistent(self):
+        samples = self._samples()
+        labels = {sample.sample_seed: self._label(sample) for sample in samples}
+
+        one = diagnose_teacher_samples(samples, labels, batch_size=1)
+        four = diagnose_teacher_samples(samples, labels, batch_size=4)
+
+        self.assertEqual(
+            [row["sample_seed"] for row in four.sample_rows],
+            [sample.sample_seed for sample in samples],
+        )
+        for left, right in zip(one.sample_rows, four.sample_rows, strict=True):
+            for size in (4, 5, 6, 7):
+                self.assertAlmostEqual(
+                    left[f"teacher_score_L{size}"],
+                    right[f"teacher_score_L{size}"],
+                    delta=1e-7,
+                )
+                self.assertAlmostEqual(
+                    left[f"teacher_p_current_L{size}"],
+                    right[f"teacher_p_current_L{size}"],
+                    delta=1e-7,
+                )
+
+    def test_runtime_is_frozen_and_interface_has_no_model_argument(self):
+        samples = self._samples()
+        labels = {sample.sample_seed: self._label(sample) for sample in samples}
+        self.assertNotIn("model", inspect.signature(diagnose_teacher_samples).parameters)
+        for kwargs, message in (
+            ({"batch_size": 0}, "batch_size"),
+            ({"tau_current": 0.2}, "tau_current"),
+            ({"tau_counterfactual": 0.1}, "tau_counterfactual"),
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ValueError, message):
+                    diagnose_teacher_samples(samples, labels, **kwargs)
+
+    def test_rejects_duplicate_samples_missing_labels_and_metadata_mismatch(self):
+        samples = self._samples()
+        labels = {sample.sample_seed: self._label(sample) for sample in samples}
+        with self.assertRaisesRegex(ValueError, "duplicate sample_seed"):
+            diagnose_teacher_samples([samples[0], samples[0]], labels)
+
+        missing = dict(labels)
+        missing.pop(samples[0].sample_seed)
+        with self.assertRaisesRegex(ValueError, "missing authority label"):
+            diagnose_teacher_samples(samples, missing)
+
+        mismatch = dict(labels)
+        mismatch[samples[0].sample_seed] = TeacherAuthorityLabel(
+            **{
+                **self._label(samples[0]).__dict__,
+                "rho": 0.9,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "metadata mismatch"):
+            diagnose_teacher_samples(samples, mismatch)
 
 
 if __name__ == "__main__":

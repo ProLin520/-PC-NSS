@@ -8,7 +8,17 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+import torch
+
+from multisource_doa.data.simulator import DOASample
+from multisource_doa.training.engine import collate_samples
+from multisource_doa.training.teacher import (
+    build_scale_teacher,
+    scale_probabilities_from_scores,
+)
 
 
 SCALE_SIZES = (4, 5, 6, 7)
@@ -32,6 +42,10 @@ THRESHOLD_COHORTS = (
     "near_miss_1p5_2",
     "far_miss_gt_2",
 )
+CURRENT_TAU = 0.10
+COUNTERFACTUAL_TAU = 0.05
+ORACLE_TIE_TOLERANCE_DEG = 1e-6
+DIVERGENCE_EPSILON = 1e-8
 
 
 @dataclass(frozen=True)
@@ -52,6 +66,11 @@ class TeacherDiagnosticInputs:
     labels_by_seed: dict[int, TeacherAuthorityLabel]
     source_manifest: dict[str, Any]
     input_sha256: dict[str, str]
+
+
+@dataclass(frozen=True)
+class TeacherDiagnosticResult:
+    sample_rows: tuple[dict[str, Any], ...]
 
 
 def load_teacher_diagnostic_inputs(
@@ -108,6 +127,219 @@ def load_teacher_diagnostic_inputs(
             ),
         },
     )
+
+
+def distribution_metrics(probabilities: Sequence[float]) -> dict[str, Any]:
+    """Return normalized entropy, maximum mass, and deterministic top scale."""
+
+    values = np.asarray(probabilities, dtype=np.float64)
+    if values.shape != (len(SCALE_SIZES),):
+        raise ValueError("probabilities must contain exactly four scales")
+    _validate_probability_vector(tuple(float(value) for value in values), "probabilities")
+    positive = values > 0.0
+    entropy = -float(np.sum(values[positive] * np.log(values[positive])))
+    dominant_index = int(np.argmax(values))
+    return {
+        "entropy_normalized": entropy / math.log(len(SCALE_SIZES)),
+        "max_probability": float(values[dominant_index]),
+        "dominant_scale": SCALE_SIZES[dominant_index],
+    }
+
+
+def build_teacher_sample_row(
+    label: TeacherAuthorityLabel,
+    scores: torch.Tensor,
+    probabilities_current: torch.Tensor,
+    probabilities_counterfactual: torch.Tensor,
+    *,
+    tau_current: float,
+) -> dict[str, Any]:
+    """Join frozen authority with teacher/student/oracle metrics for one sample."""
+
+    raw = _finite_vector(scores, "teacher scores")
+    current = _finite_vector(probabilities_current, "current teacher probabilities")
+    counterfactual = _finite_vector(
+        probabilities_counterfactual,
+        "counterfactual teacher probabilities",
+    )
+    if raw.shape != (len(SCALE_SIZES),):
+        raise ValueError("teacher scores must contain exactly four scales")
+    current_metrics = distribution_metrics(current)
+    counterfactual_metrics = distribution_metrics(counterfactual)
+    student = np.asarray(label.student_probabilities, dtype=np.float64)
+    student_metrics = distribution_metrics(student)
+    fixed_rmspe = {
+        size: _finite_number(label.fixed_rmspe_deg.get(size), f"L{size} sample_rmspe_deg")
+        for size in SCALE_SIZES
+    }
+
+    sorted_scores = np.sort(raw)
+    score_margin = float(sorted_scores[-1] - sorted_scores[-2])
+    oracle_min = min(fixed_rmspe.values())
+    oracle_scales = tuple(
+        size
+        for size in SCALE_SIZES
+        if fixed_rmspe[size] - oracle_min <= ORACLE_TIE_TOLERANCE_DEG
+    )
+    teacher_scale = int(current_metrics["dominant_scale"])
+    if counterfactual_metrics["dominant_scale"] != teacher_scale:
+        raise ValueError("temperature change altered teacher score ranking")
+    kl = _kl_divergence(current, student)
+    midpoint = 0.5 * (current + student)
+    js = 0.5 * _kl_divergence(current, midpoint) + 0.5 * _kl_divergence(
+        student, midpoint
+    )
+    row: dict[str, Any] = {
+        "sample_seed": label.sample_seed,
+        "true_angle_1_deg": label.true_angles_deg[0],
+        "true_angle_2_deg": label.true_angles_deg[1],
+        "rho": label.rho,
+        "snr_db": label.snr_db,
+        "snapshot_count": label.snapshot_count,
+        "separation_deg": label.separation_deg,
+        "threshold_cohort": label.threshold_cohort,
+        **{
+            f"teacher_score_L{size}": float(raw[index])
+            for index, size in enumerate(SCALE_SIZES)
+        },
+        **{
+            f"teacher_p_current_L{size}": float(current[index])
+            for index, size in enumerate(SCALE_SIZES)
+        },
+        **{
+            f"teacher_p_counterfactual_L{size}": float(counterfactual[index])
+            for index, size in enumerate(SCALE_SIZES)
+        },
+        **{
+            f"student_p_L{size}": float(student[index])
+            for index, size in enumerate(SCALE_SIZES)
+        },
+        "teacher_entropy_current": current_metrics["entropy_normalized"],
+        "teacher_entropy_counterfactual": counterfactual_metrics[
+            "entropy_normalized"
+        ],
+        "teacher_max_probability_current": current_metrics["max_probability"],
+        "teacher_max_probability_counterfactual": counterfactual_metrics[
+            "max_probability"
+        ],
+        "teacher_dominant_scale": teacher_scale,
+        "teacher_dominant_scale_current": teacher_scale,
+        "teacher_dominant_scale_counterfactual": counterfactual_metrics[
+            "dominant_scale"
+        ],
+        "student_entropy_normalized": student_metrics["entropy_normalized"],
+        "student_max_probability": student_metrics["max_probability"],
+        "student_dominant_scale": student_metrics["dominant_scale"],
+        "teacher_score_margin": score_margin,
+        "teacher_score_margin_over_tau": score_margin / tau_current,
+        "teacher_student_kl": kl,
+        "teacher_student_js": max(0.0, float(js)),
+        "oracle_best_scales": oracle_scales,
+        "teacher_oracle_agreement": teacher_scale in oracle_scales,
+        "teacher_regret_deg": fixed_rmspe[teacher_scale] - oracle_min,
+        **{
+            f"fbss_L{size}_sample_rmspe_deg": fixed_rmspe[size]
+            for size in SCALE_SIZES
+        },
+    }
+    _require_finite_row(row)
+    return row
+
+
+def diagnose_teacher_samples(
+    samples: Sequence[DOASample],
+    labels_by_seed: Mapping[int, TeacherAuthorityLabel],
+    *,
+    batch_size: int = 128,
+    tau_current: float = CURRENT_TAU,
+    tau_counterfactual: float = COUNTERFACTUAL_TAU,
+) -> TeacherDiagnosticResult:
+    """Compute the frozen physical teacher on CPU without a neural model."""
+
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    if not math.isclose(tau_current, CURRENT_TAU, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(f"tau_current must be fixed at {CURRENT_TAU}")
+    if not math.isclose(
+        tau_counterfactual,
+        COUNTERFACTUAL_TAU,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(
+            f"tau_counterfactual must be fixed at {COUNTERFACTUAL_TAU}"
+        )
+    sample_seeds = [sample.sample_seed for sample in samples]
+    if len(sample_seeds) != len(set(sample_seeds)):
+        raise ValueError("samples contain duplicate sample_seed values")
+    if set(sample_seeds) != set(labels_by_seed):
+        missing = sorted(set(sample_seeds) - set(labels_by_seed))
+        extra = sorted(set(labels_by_seed) - set(sample_seeds))
+        raise ValueError(f"missing authority label or extra label: missing={missing}, extra={extra}")
+
+    rows: list[dict[str, Any]] = []
+    with torch.no_grad():
+        for start in range(0, len(samples), batch_size):
+            batch_samples = list(samples[start : start + batch_size])
+            batch = collate_samples(batch_samples)
+            if any(tensor.device.type != "cpu" for tensor in batch.fbss_covariances.values()):
+                raise ValueError("teacher diagnosis must run on CPU")
+            teacher = build_scale_teacher(
+                batch.fbss_covariances,
+                batch.true_angles_deg,
+                tau_scale=tau_current,
+            )
+            counterfactual = scale_probabilities_from_scores(
+                teacher.scale_scores,
+                tau_scale=tau_counterfactual,
+            )
+            for sample, scores, current, colder in zip(
+                batch_samples,
+                teacher.scale_scores,
+                teacher.scale_probabilities,
+                counterfactual,
+                strict=True,
+            ):
+                label = labels_by_seed[sample.sample_seed]
+                validate_regenerated_metadata(sample, label)
+                rows.append(
+                    build_teacher_sample_row(
+                        label,
+                        scores,
+                        current,
+                        colder,
+                        tau_current=tau_current,
+                    )
+                )
+    return TeacherDiagnosticResult(sample_rows=tuple(rows))
+
+
+def validate_regenerated_metadata(
+    sample: DOASample,
+    label: TeacherAuthorityLabel,
+) -> None:
+    """Require deterministic validation regeneration to match authority exactly."""
+
+    separation = float(abs(np.diff(sample.angles_deg)[0]))
+    if (
+        sample.sample_seed != label.sample_seed
+        or not np.allclose(
+            sample.angles_deg,
+            label.true_angles_deg,
+            rtol=0.0,
+            atol=1e-9,
+        )
+        or sample.rho != label.rho
+        or sample.snr_db != label.snr_db
+        or sample.snapshot_count != label.snapshot_count
+        or not math.isclose(
+            separation,
+            label.separation_deg,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    ):
+        raise ValueError(f"metadata mismatch for sample_seed {sample.sample_seed}")
 
 
 def _read_and_validate_algorithms(
@@ -289,6 +521,49 @@ def _validate_probability_vector(values: tuple[float, ...], name: str) -> None:
         raise ValueError(f"{name} must be finite and nonnegative")
     if not math.isclose(math.fsum(values), 1.0, rel_tol=0.0, abs_tol=1e-6):
         raise ValueError(f"{name} must sum to one")
+
+
+def _finite_vector(values: torch.Tensor, name: str) -> np.ndarray:
+    array = np.asarray(torch.as_tensor(values).detach().cpu(), dtype=np.float64)
+    if not np.isfinite(array).all():
+        raise ValueError(f"{name} must be finite")
+    return array
+
+
+def _finite_number(value: Any, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be finite")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be finite") from error
+    if not math.isfinite(numeric):
+        raise ValueError(f"{name} must be finite")
+    return numeric
+
+
+def _kl_divergence(left: np.ndarray, right: np.ndarray) -> float:
+    positive = left > 0.0
+    safe_right = np.clip(right, DIVERGENCE_EPSILON, None)
+    value = float(np.sum(left[positive] * np.log(left[positive] / safe_right[positive])))
+    if value < 0.0 and value >= -1e-12:
+        return 0.0
+    if value < 0.0 or not math.isfinite(value):
+        raise ValueError("divergence must be finite and nonnegative")
+    return value
+
+
+def _require_finite_row(row: Mapping[str, Any]) -> None:
+    for key, value in row.items():
+        if isinstance(value, bool) or value is None or isinstance(value, str):
+            continue
+        if isinstance(value, tuple):
+            if not all(isinstance(item, int) for item in value):
+                raise ValueError(f"{key} tuple must contain integer scales")
+            continue
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            continue
+        raise ValueError(f"{key} must be finite or schema-compatible")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
