@@ -60,6 +60,21 @@ validation schema-v2 报告、对应冻结 checkpoint，以及由配对审计确
 拒绝覆盖，`outputs/` 和诊断结果不提交到 Git。此诊断只用于解释冻结结果，不构成训练、
 重新训练或访问 development/locked test 的授权。
 
+## Teacher 尺度置信只读诊断
+
+直接运行 `scripts/diagnose_pcnss_teacher_confidence.py` 默认只做 CPU `dry_run`，不会读取
+checkpoint、正式评价报告或 Task 14 输出，也不会创建目录。4 样本 smoke 只使用确定性的
+train 样本和内存合成标签，不运行 PC-NSS 前向或训练。
+
+正式入口只允许 `stage="diagnose_validation_teacher"`、validation、CPU、batch size 128，
+并固定比较 `tau=0.10` 与只读反事实 `tau=0.05`。它认证 audit-v4 和 Task 14
+schema-complete 输入后，仅重建冻结的 1270 个 `[2,4)` 样本并调用物理 teacher；不会加载
+checkpoint、实例化 `MultiScalePCNSS`、访问 development/locked test 或运行完整 5000
+样本 evaluator。
+
+输出为六个新的 CSV/JSON 文件，目录存在时拒绝覆盖，且不得提交 `outputs/`。诊断结果只用于
+判断是否允许另写 `tau_scale` 单因素训练预注册；无论结论如何，本入口都不授权训练。
+
 ## 运行分工
 
 - Agent：RED/GREEN、目标及完整工程单测、`compileall`、默认 dry-run、4 样本 smoke。

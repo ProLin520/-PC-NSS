@@ -19,6 +19,9 @@ from multisource_doa.models.pc_nss import MultiScalePCNSS
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUN_SCRIPT = PROJECT_ROOT / "scripts" / "run_multiscale_pcnss.py"
 DIAGNOSTIC_SCRIPT = PROJECT_ROOT / "scripts" / "diagnose_pcnss_near_resolution.py"
+TEACHER_DIAGNOSTIC_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "diagnose_pcnss_teacher_confidence.py"
+)
 
 
 class EntrypointTest(unittest.TestCase):
@@ -220,6 +223,101 @@ class EntrypointTest(unittest.TestCase):
             self.assertTrue((output / "smoke_summary.json").is_file())
             self.assertFalse((output / "best.pt").exists())
             self.assertFalse((output / "locked_test_manifest.json").exists())
+
+
+class TeacherDiagnosticEntrypointTest(unittest.TestCase):
+    def test_default_dry_run_is_cpu_only_and_creates_nothing(self):
+        namespace = runpy.run_path(str(TEACHER_DIAGNOSTIC_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unused"
+            values = dict(namespace["RUN_CONFIG"], output_root=str(output))
+
+            result = namespace["run_stage"](values)
+
+            self.assertEqual(result["stage"], "dry_run")
+            self.assertEqual(result["device"], "cpu")
+            self.assertEqual(result["batch_size"], 128)
+            self.assertFalse(result["locked_test_access"])
+            self.assertFalse(result["output_created"])
+            self.assertTrue(result["no_model_forward"])
+            self.assertFalse(result["training_performed"])
+            self.assertFalse(output.exists())
+
+    def test_direct_paths_reject_unsafe_runtime_values(self):
+        namespace = runpy.run_path(str(TEACHER_DIAGNOSTIC_SCRIPT))
+        base = dict(namespace["RUN_CONFIG"])
+        cases = (
+            ({"device": "cuda"}, ValueError, "CPU"),
+            ({"batch_size": 4}, ValueError, "128"),
+            ({"split": "development"}, PermissionError, "validation"),
+            ({"allow_locked_test": True}, PermissionError, "locked_test"),
+            ({"tau_current": 0.2}, ValueError, "tau_current"),
+            ({"tau_counterfactual": 0.1}, ValueError, "tau_counterfactual"),
+            ({"overwrite": True}, ValueError, "overwrite"),
+        )
+        for update, error_type, message in cases:
+            with self.subTest(update=update):
+                with self.assertRaisesRegex(error_type, message):
+                    namespace["run_dry_run"]({**base, **update})
+
+    def test_config_rejects_unknown_keys_and_non_frozen_batch(self):
+        namespace = runpy.run_path(str(TEACHER_DIAGNOSTIC_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"unexpected": True}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown config keys"):
+                namespace["load_config"](path)
+
+            path.write_text(json.dumps({"batch_size": 4}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "128"):
+                namespace["load_config"](path)
+
+    def test_formal_path_rejects_dry_run_and_existing_output_before_reads(self):
+        namespace = runpy.run_path(str(TEACHER_DIAGNOSTIC_SCRIPT))
+        base = dict(namespace["RUN_CONFIG"], stage="diagnose_validation_teacher")
+        with self.assertRaisesRegex(ValueError, "dry_run"):
+            namespace["run_diagnostic"](base)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "existing"
+            output.mkdir()
+            with self.assertRaises(FileExistsError):
+                namespace["run_diagnostic"](
+                    {**base, "dry_run": False, "output_root": str(output)}
+                )
+
+    def test_four_sample_smoke_uses_train_data_and_writes_six_files(self):
+        namespace = runpy.run_path(str(TEACHER_DIAGNOSTIC_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "smoke"
+            result = namespace["run_smoke"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "stage": "smoke",
+                    "sample_count": 4,
+                    "output_root": str(output),
+                }
+            )
+
+            self.assertEqual(result["sample_count"], 4)
+            self.assertFalse(result["training_performed"])
+            self.assertTrue(result["no_model_forward"])
+            self.assertEqual(
+                {path.name for path in output.iterdir()},
+                {
+                    "diagnostic_config.json",
+                    "source_manifest.json",
+                    "teacher_sample_diagnostics.csv",
+                    "teacher_summary.json",
+                    "teacher_stratified_summary.csv",
+                    "decision.json",
+                },
+            )
+            manifest = json.loads(
+                (output / "source_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(manifest["no_model_forward"])
+            self.assertFalse(manifest["training_performed"])
+            self.assertNotIn("checkpoint_path", manifest)
 
 
 if __name__ == "__main__":
