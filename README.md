@@ -105,6 +105,15 @@ cache 记录 L4–L7 固定 FBSS + Root-MUSIC 的 failure-aware 匹配角 RMSPE�
 
 正式输出默认拒绝覆盖；`outputs/`、权重、生成数据和密钥不会提交到 Git。
 
+## 单因素身份审计
+
+`scripts/audit_pcnss_teacher_single_factor.py` 在训练前只读认证物理 teacher 基线、其
+validation 报告、Task 16 `ranking_invalid` 结论和 train-only teacher cache。默认
+`dry_run` 不读取这些输入，也不创建目录；`smoke` 只写三文件合成审计报告。正式审计只允许
+CPU，并拒绝覆盖或访问 locked test。只有所有数据、模型、checkpoint、评估协议和训练环境
+身份门同时通过时才允许复用旧物理基线，否则结论固定为重新运行物理 teacher 对照组；审计
+本身不授权或执行训练。
+
 设计与实施文档：
 
 - `docs/superpowers/specs/2026-08-04-multiscale-pcnss-design.md`

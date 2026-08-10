@@ -29,6 +29,9 @@ TEACHER_RANKING_SCRIPT = (
 ERROR_TEACHER_CACHE_SCRIPT = (
     PROJECT_ROOT / "scripts" / "build_pcnss_failure_aware_teacher_cache.py"
 )
+SINGLE_FACTOR_AUDIT_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "audit_pcnss_teacher_single_factor.py"
+)
 
 
 class EntrypointTest(unittest.TestCase):
@@ -458,6 +461,49 @@ class ErrorTeacherCacheEntrypointTest(unittest.TestCase):
             )
             self.assertEqual(len(loaded.labels_by_seed), 4)
             self.assertEqual(len(list(output.iterdir())), 3)
+
+
+class SingleFactorAuditEntrypointTest(unittest.TestCase):
+    def test_default_reads_nothing_and_creates_nothing(self):
+        namespace = runpy.run_path(str(SINGLE_FACTOR_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unused"
+            result = namespace["run_stage"](
+                {**namespace["RUN_CONFIG"], "output_root": str(output)}
+            )
+            self.assertEqual(result["stage"], "dry_run")
+            self.assertFalse(result["output_created"])
+            self.assertFalse(result["training_performed"])
+            self.assertFalse(output.exists())
+
+    def test_formal_requires_all_sources_and_rejects_unsafe_values(self):
+        namespace = runpy.run_path(str(SINGLE_FACTOR_AUDIT_SCRIPT))
+        base = dict(
+            namespace["RUN_CONFIG"], stage="audit_single_factor", dry_run=False
+        )
+        with self.assertRaises(ValueError):
+            namespace["run_stage"](base)
+        for update, error_type in (
+            ({"device": "cuda"}, ValueError),
+            ({"allow_locked_test": True}, PermissionError),
+            ({"overwrite": True}, ValueError),
+        ):
+            with self.subTest(update=update), self.assertRaises(error_type):
+                namespace["_validate_safe_config"]({**base, **update})
+
+    def test_smoke_writes_three_file_nontraining_report(self):
+        namespace = runpy.run_path(str(SINGLE_FACTOR_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "smoke"
+            result = namespace["run_stage"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "stage": "smoke",
+                    "output_root": str(output),
+                }
+            )
+            self.assertEqual(len(list(output.iterdir())), 3)
+            self.assertFalse(result["training_performed"])
 
 
 if __name__ == "__main__":
