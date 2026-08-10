@@ -11,6 +11,9 @@ from multisource_doa.evaluation.runner import EvaluationRunResult
 from multisource_doa.training.artifacts import prepare_run_directory
 
 
+REPORT_SCHEMA_VERSION = 2
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
@@ -70,11 +73,13 @@ def write_evaluation_report(
     _write_json(
         output / "summary.json",
         {
+            "report_schema_version": REPORT_SCHEMA_VERSION,
             "framework_validation": True,
             "research_acceptance": "not_run",
             "split": result.split.value,
             "best_fixed_fbss_scale": result.best_fixed_fbss_scale,
             "algorithms": result.summaries,
+            "near_separation_audit": result.near_separation_audit,
         },
     )
 

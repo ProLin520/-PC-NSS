@@ -11,7 +11,24 @@ from multisource_doa.evaluation.matching import (
     MatchResult,
     hungarian_match,
     is_resolved,
+    resolution_components,
 )
+
+
+CONTINUOUS_STRATA_BINS = {
+    "separation_deg": (
+        (2.0, 4.0, "[2,4)"),
+        (4.0, 6.0, "[4,6)"),
+        (6.0, 8.0, "[6,8)"),
+        (8.0, 10.0, "[8,10]"),
+    ),
+    "snr_db": (
+        (-5.0, 0.0, "[-5,0)"),
+        (0.0, 5.0, "[0,5)"),
+        (5.0, 10.0, "[5,10]"),
+    ),
+}
+NEAR_SEPARATION_BIN = "[2,4)"
 
 
 @dataclass(frozen=True)
@@ -19,6 +36,8 @@ class SampleScore:
     sample_id: Hashable
     match: MatchResult
     resolved: bool
+    both_angle_errors_within_1_deg: bool
+    estimated_separation_at_least_half_true: bool
     sample_rmspe_deg: float
     strata: dict[str, Any]
 
@@ -49,11 +68,18 @@ def score_doa_sample(
             success=False,
             failure_reason=failure_reason or match.failure_reason or "estimator_failure",
         )
+    components = resolution_components(match, true_angles)
     rmspe = float(np.sqrt(np.mean(np.square(match.absolute_errors_deg))))
     return SampleScore(
         sample_id=sample_id,
         match=match,
         resolved=is_resolved(match, true_angles),
+        both_angle_errors_within_1_deg=components[
+            "both_angle_errors_within_1_deg"
+        ],
+        estimated_separation_at_least_half_true=components[
+            "estimated_separation_at_least_half_true"
+        ],
         sample_rmspe_deg=rmspe,
         strata=dict(strata or {}),
     )
@@ -111,6 +137,93 @@ def _comparison_label(
     return "win" if difference < 0.0 else "loss"
 
 
+def _continuous_bin_label(stratum: str, raw_value: Any) -> str:
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{stratum} must be a finite number") from error
+    if not np.isfinite(value):
+        raise ValueError(f"{stratum} must be a finite number")
+    bins = CONTINUOUS_STRATA_BINS[stratum]
+    for index, (lower, upper, label) in enumerate(bins):
+        is_last = index == len(bins) - 1
+        if lower <= value < upper or (
+            is_last
+            and lower <= value
+            and (value <= upper or np.isclose(value, upper, atol=1e-9, rtol=0.0))
+        ):
+            return label
+    lower = bins[0][0]
+    upper = bins[-1][1]
+    raise ValueError(f"{stratum}={value} lies outside [{lower},{upper}]")
+
+
+def _stratum_label(stratum: str, raw_value: Any) -> str:
+    if stratum in CONTINUOUS_STRATA_BINS:
+        return _continuous_bin_label(stratum, raw_value)
+    return str(raw_value)
+
+
+def _index_unique_scores(
+    scores: Iterable[SampleScore],
+    side: str,
+) -> dict[Hashable, SampleScore]:
+    indexed: dict[Hashable, SampleScore] = {}
+    for score in scores:
+        if score.sample_id in indexed:
+            raise ValueError(f"duplicate sample_id in {side}: {score.sample_id}")
+        indexed[score.sample_id] = score
+    return indexed
+
+
+def _count_and_rate(count: int, sample_count: int) -> dict[str, int | float | None]:
+    return {
+        "count": int(count),
+        "rate": float(count / sample_count) if sample_count else None,
+    }
+
+
+def aggregate_near_separation_audit(
+    scores: Iterable[SampleScore],
+) -> dict[str, Any]:
+    """Decompose the frozen resolution rule for separation in [2,4)."""
+
+    items = []
+    for score in scores:
+        if "separation_deg" not in score.strata:
+            raise ValueError("near-separation audit requires separation_deg")
+        if _continuous_bin_label(
+            "separation_deg", score.strata["separation_deg"]
+        ) == NEAR_SEPARATION_BIN:
+            items.append(score)
+    sample_count = len(items)
+    angle_count = sum(item.both_angle_errors_within_1_deg for item in items)
+    separation_count = sum(
+        item.estimated_separation_at_least_half_true for item in items
+    )
+    resolved_count = sum(item.resolved for item in items)
+    return {
+        "separation_bin": NEAR_SEPARATION_BIN,
+        "sample_count": sample_count,
+        "both_angle_errors_within_1_deg": _count_and_rate(
+            angle_count, sample_count
+        ),
+        "estimated_separation_at_least_half_true": _count_and_rate(
+            separation_count, sample_count
+        ),
+        "resolved": _count_and_rate(resolved_count, sample_count),
+        "sample_rmspe_gt_10_deg": _count_and_rate(
+            sum(item.sample_rmspe_deg > 10.0 for item in items), sample_count
+        ),
+        "sample_rmspe_gt_30_deg": _count_and_rate(
+            sum(item.sample_rmspe_deg > 30.0 for item in items), sample_count
+        ),
+        "sample_rmspe_gt_60_deg": _count_and_rate(
+            sum(item.sample_rmspe_deg > 60.0 for item in items), sample_count
+        ),
+    }
+
+
 def paired_comparison(
     reference: Iterable[SampleScore],
     candidate: Iterable[SampleScore],
@@ -123,8 +236,8 @@ def paired_comparison(
         "rho",
     ),
 ) -> dict[str, Any]:
-    reference_by_id = {item.sample_id: item for item in reference}
-    candidate_by_id = {item.sample_id: item for item in candidate}
+    reference_by_id = _index_unique_scores(reference, "reference")
+    candidate_by_id = _index_unique_scores(candidate, "candidate")
     if reference_by_id.keys() != candidate_by_id.keys():
         raise ValueError("paired comparisons require identical sample ids")
     result: dict[str, Any] = {"overall": _empty_counts()}
@@ -144,7 +257,7 @@ def paired_comparison(
                 raise ValueError(f"paired stratum mismatch for {stratum}")
             group_name = f"by_{stratum}"
             group = result.setdefault(group_name, {})
-            value = str(left.strata.get(stratum))
+            value = _stratum_label(stratum, left.strata.get(stratum))
             counts = group.setdefault(value, _empty_counts())
             counts[label] += 1
     return result

@@ -59,12 +59,18 @@ RUN_CONFIG = {
     "output_root": "outputs/multiscale_pcnss_snap20_seed2026",
     "checkpoint_path": "",  # 空字符串表示使用 output_root/best.pt
     "selected_best_fbss_scale": None,
+    "evaluation_batch_size": 128,  # 与 checkpoint validation 保持一致
     "allow_locked_test": False,
     "overwrite": False,
 }
 ```
 
 validation 报告同时包含原始 Root-MUSIC、各固定尺度 FBSS Root-MUSIC、oracle 固定尺度上界、PC-NSS 和尚未接入的外部深度基线状态。根据整套 validation 全局选择唯一的 `best_fixed_fbss_scale`；不得逐样本选择，也不得按间隔、SNR 或结果好坏切换尺度。
+
+评价报告 schema v2 保留原有七个文件和旧字段，并增加连续变量区间化的
+paired comparison、`[2,4)` 近间隔分辨条件拆解和样本 RMSPE 尾部统计。
+已有 `validation_report` 不得覆盖；审计重跑时使用新的 `output_root`，并把
+`checkpoint_path` 显式指向原实验的 `best.pt`。
 
 ## 3. development 评估
 

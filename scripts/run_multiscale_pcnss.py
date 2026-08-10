@@ -23,7 +23,10 @@ from multisource_doa.data.dataset import PCNSSDataset
 from multisource_doa.data.manifest import build_split_manifest, write_split_manifest
 from multisource_doa.data.simulator import generate_two_source_sample
 from multisource_doa.evaluation.reporting import write_evaluation_report
-from multisource_doa.evaluation.runner import evaluate_samples
+from multisource_doa.evaluation.runner import (
+    DEFAULT_INFERENCE_BATCH_SIZE,
+    evaluate_samples,
+)
 from multisource_doa.models.pc_nss import MultiScalePCNSS
 from multisource_doa.physics.lags import build_multiscale_views
 from multisource_doa.training.artifacts import CheckpointManager, prepare_run_directory
@@ -31,20 +34,19 @@ from multisource_doa.training.engine import collate_samples, train_one_epoch, va
 
 
 RUN_CONFIG = {
-    "stage": "evaluate_validation",
-    "dry_run": False,
+    "stage": "dry_run",
+    "dry_run": True,
     "model_seed": 2026,
-    "split": "validation",
+    "split": "train",
     "sample_count": 4,
-    "output_root": r"D:\Python\Project\doa_estimation\MultiSource_DOA\.worktrees\pcnss-foundation\scripts\outputs\multiscale_pcnss_snap20_seed2026_audit_v3",
-    "checkpoint_path": r"D:\Python\Project\doa_estimation\MultiSource_DOA\.worktrees\pcnss-foundation\scripts\outputs\multiscale_pcnss_snap20_seed2026\best.pt",
+    "output_root": "outputs/multiscale_pcnss_snap20",
     "allow_locked_test": False,
     "overwrite": False,
-    "device": "cuda",
+    "device": "cpu",
+    "checkpoint_path": "",
     "selected_best_fbss_scale": None,
-    "evaluation_batch_size": 128,
+    "evaluation_batch_size": DEFAULT_INFERENCE_BATCH_SIZE,
 }
-
 
 STAGES = (
     "dry_run",
@@ -307,6 +309,9 @@ def run_formal_evaluation(values: dict, split: SplitName) -> dict:
         split=split,
         device=device,
         selected_best_fbss_scale=values.get("selected_best_fbss_scale"),
+        inference_batch_size=int(
+            values.get("evaluation_batch_size", config.training.batch_size)
+        ),
     )
     report_name = (
         "validation_report" if split is SplitName.VALIDATION else "development_report"
