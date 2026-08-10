@@ -75,6 +75,17 @@ checkpoint、实例化 `MultiScalePCNSS`、访问 development/locked test 或运
 输出为六个新的 CSV/JSON 文件，目录存在时拒绝覆盖，且不得提交 `outputs/`。诊断结果只用于
 判断是否允许另写 `tau_scale` 单因素训练预注册；无论结论如何，本入口都不授权训练。
 
+## Teacher 排序有效性只读诊断
+
+`scripts/diagnose_pcnss_teacher_ranking.py` 默认同样只做 CPU `dry_run`。正式入口固定为
+`stage="diagnose_validation_teacher_ranking"`、validation、CPU、batch size 128，只认证并
+重建 Task 15 的 1270 个近间隔样本，拆解当前 teacher score 并比较 L4–L7 的固定尺度
+failure-aware RMSPE 排序。它不加载 checkpoint、不运行神经模型、不修改 teacher，也不训练。
+
+4 样本 smoke 只使用 train split 和内存合成 RMSPE。正式输出为八个 schema-v1 CSV/JSON
+文件，新目录存在时拒绝覆盖，且不得提交 `outputs/`。结论只决定下一项应研究标定、组成项抵消，
+还是 train-only 角误差 teacher；Task 16 本身不授权任何训练。
+
 ## 运行分工
 
 - Agent：RED/GREEN、目标及完整工程单测、`compileall`、默认 dry-run、4 样本 smoke。
