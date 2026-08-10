@@ -5,6 +5,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from collections.abc import Mapping
 
 from multisource_doa.config import ExperimentConfig, SplitName
 from multisource_doa.data.simulator import GENERATOR_VERSION
@@ -72,12 +73,16 @@ def write_split_manifest(
     path: str | Path,
     config: ExperimentConfig,
     split: SplitName,
+    *,
+    extra_metadata: Mapping[str, Any] | None = None,
 ) -> Path:
     destination = Path(path)
     if destination.exists():
         raise FileExistsError(f"refusing to overwrite manifest: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = build_split_manifest(config, split)
+    if extra_metadata is not None:
+        payload["training_metadata"] = _to_jsonable(dict(extra_metadata))
     destination.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",

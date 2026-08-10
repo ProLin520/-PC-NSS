@@ -4,15 +4,21 @@ import numpy as np
 import torch
 
 from multisource_doa.data.simulator import steering_vector
+from multisource_doa.config import ExperimentConfig
+from multisource_doa.data.simulator import generate_two_source_sample
+from multisource_doa.models.pc_nss import MultiScalePCNSS
+from multisource_doa.training.engine import collate_samples
 from multisource_doa.training.losses import (
     aggregate_scale_weights,
     compose_total_loss,
     dominance_loss,
     normalized_lag_smooth_l1,
     peak_separation_loss,
+    pcnss_loss,
     resolution_score,
     scale_distillation_loss,
 )
+from multisource_doa.training.teacher import build_scale_teacher
 
 
 def _covariance(angles_deg):
@@ -22,6 +28,64 @@ def _covariance(angles_deg):
 
 
 class ResolutionAwareLossTest(unittest.TestCase):
+    def test_optional_scale_target_changes_only_scale_branch(self):
+        sample = generate_two_source_sample(
+            ExperimentConfig(), split_seed=902, index=0,
+            rho=1.0, snr_db=5.0, snapshot_count=20,
+            center_deg=0.0, separation_deg=3.0,
+        )
+        batch = collate_samples([sample])
+        output = MultiScalePCNSS()(
+            batch.raw_lags_ri, batch.fbss_lags_ri, batch.valid_mask,
+            batch.effective_counts, batch.quality_features,
+        )
+        teacher = build_scale_teacher(batch.fbss_covariances, batch.true_angles_deg)
+        fallback = pcnss_loss(
+            output, teacher, batch.target_lags_ri, batch.true_angles_deg,
+            batch.valid_mask, batch.effective_counts, epoch=10,
+        )
+        explicit = pcnss_loss(
+            output, teacher, batch.target_lags_ri, batch.true_angles_deg,
+            batch.valid_mask, batch.effective_counts, epoch=10,
+            scale_distillation_target=teacher.scale_probabilities,
+        )
+        other_index = (teacher.scale_probabilities.argmax(dim=-1).item() + 1) % 4
+        hard = torch.zeros_like(teacher.scale_probabilities)
+        hard[:, other_index] = 1.0
+        changed = pcnss_loss(
+            output, teacher, batch.target_lags_ri, batch.true_angles_deg,
+            batch.valid_mask, batch.effective_counts, epoch=10,
+            scale_distillation_target=hard,
+        )
+
+        torch.testing.assert_close(fallback.scale, explicit.scale)
+        for field in ("lag", "residual", "peak", "dominance"):
+            torch.testing.assert_close(getattr(fallback, field), getattr(changed, field))
+        self.assertNotAlmostEqual(fallback.scale.item(), changed.scale.item())
+
+    def test_scale_target_rejects_invalid_probability_rows(self):
+        sample = generate_two_source_sample(
+            ExperimentConfig(), split_seed=903, index=0,
+            rho=1.0, snr_db=5.0, snapshot_count=20,
+        )
+        batch = collate_samples([sample])
+        output = MultiScalePCNSS()(
+            batch.raw_lags_ri, batch.fbss_lags_ri, batch.valid_mask,
+            batch.effective_counts, batch.quality_features,
+        )
+        teacher = build_scale_teacher(batch.fbss_covariances, batch.true_angles_deg)
+        for target in (
+            torch.ones(1, 3), torch.tensor([[1.0, -1.0, 1.0, 0.0]]),
+            torch.tensor([[0.1, 0.1, 0.1, 0.1]]),
+            torch.tensor([[float("nan"), 0.0, 0.0, 1.0]]),
+        ):
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                pcnss_loss(
+                    output, teacher, batch.target_lags_ri, batch.true_angles_deg,
+                    batch.valid_mask, batch.effective_counts, epoch=10,
+                    scale_distillation_target=target,
+                )
+
     def test_scale_kl_penalizes_wrong_collapsed_scale(self):
         teacher = torch.tensor([[0.05, 0.10, 0.80, 0.05]])
         aligned = torch.tensor([[0.05, 0.10, 0.80, 0.05]])

@@ -1,7 +1,7 @@
 """Small, auditable PC-NSS training and validation engine."""
 
 from dataclasses import dataclass, fields
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 import torch
@@ -106,6 +106,24 @@ def _to_device(batch: PCNSSBatch, device: torch.device) -> PCNSSBatch:
     return PCNSSBatch(**values)
 
 
+ScaleTargetLookup = Mapping[int, tuple[float, float, float, float]]
+
+
+def _batch_scale_target(
+    batch: PCNSSBatch,
+    lookup: ScaleTargetLookup,
+    device: torch.device,
+) -> torch.Tensor:
+    missing = [seed for seed in batch.sample_seeds if seed not in lookup]
+    if missing:
+        raise KeyError(f"teacher cache missing sample seeds: {missing[:4]}")
+    return torch.tensor(
+        [lookup[seed] for seed in batch.sample_seeds],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
 def _batch_diagnostics(output, breakdown, batch: PCNSSBatch) -> dict[str, float]:
     distribution = breakdown.scale_distribution.detach()
     entropy = -(
@@ -179,6 +197,7 @@ def train_one_epoch(
     epoch: int,
     device: torch.device,
     split: SplitName = SplitName.TRAIN,
+    scale_targets_by_seed: ScaleTargetLookup | None = None,
 ) -> dict[str, float]:
     if SplitName(split) is not SplitName.TRAIN:
         raise PermissionError("training updates are restricted to the train split")
@@ -199,6 +218,11 @@ def train_one_epoch(
             batch.effective_counts,
             batch.quality_features,
         )
+        scale_target = (
+            None
+            if scale_targets_by_seed is None
+            else _batch_scale_target(cpu_batch, scale_targets_by_seed, device)
+        )
         breakdown = pcnss_loss(
             output,
             teacher,
@@ -207,6 +231,7 @@ def train_one_epoch(
             batch.valid_mask,
             batch.effective_counts,
             epoch=epoch,
+            scale_distillation_target=scale_target,
         )
         if not torch.isfinite(breakdown.total):
             raise FloatingPointError("non-finite PC-NSS training loss")

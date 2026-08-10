@@ -56,6 +56,23 @@ def scale_distillation_loss(
     return (teacher * (teacher.log() - predicted.log())).sum(dim=-1).mean()
 
 
+def _scale_distillation_target(
+    physical: torch.Tensor,
+    override: torch.Tensor | None,
+) -> torch.Tensor:
+    target = physical if override is None else override.to(
+        device=physical.device, dtype=physical.dtype
+    )
+    if target.shape != physical.shape:
+        raise ValueError("scale_distillation_target must have shape [batch,4]")
+    if not torch.isfinite(target).all() or (target < 0.0).any():
+        raise ValueError("scale_distillation_target must be finite and non-negative")
+    expected = torch.ones(target.shape[0], device=target.device, dtype=target.dtype)
+    if not torch.allclose(target.sum(dim=-1), expected, atol=1e-6, rtol=0.0):
+        raise ValueError("scale_distillation_target rows must sum to one")
+    return target.detach()
+
+
 def _normalize_lags(lags_ri: torch.Tensor) -> torch.Tensor:
     scale = lags_ri[:, 0, 0].abs().clamp_min(1e-8)
     return lags_ri / scale[:, None, None]
@@ -148,6 +165,7 @@ def pcnss_loss(
     effective_counts: torch.Tensor,
     *,
     epoch: int,
+    scale_distillation_target: torch.Tensor | None = None,
 ) -> PCNSSLossBreakdown:
     distribution = aggregate_scale_weights(
         output.scale_weights,
@@ -155,10 +173,11 @@ def pcnss_loss(
         effective_counts,
     )
     lag = normalized_lag_smooth_l1(output.corrected_lags_ri, target_lags_ri)
-    scale = scale_distillation_loss(
+    scale_target = _scale_distillation_target(
         teacher.scale_probabilities.to(distribution.device),
-        distribution,
+        scale_distillation_target,
     )
+    scale = scale_distillation_loss(scale_target, distribution)
     residual = residual_regularization(output)
     peak = peak_separation_loss(output.covariance, true_angles_deg)
     predicted_score = resolution_score(output.covariance, true_angles_deg)

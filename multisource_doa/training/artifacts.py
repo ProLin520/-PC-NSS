@@ -3,8 +3,10 @@
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -54,6 +56,7 @@ class CheckpointManager:
         data_split_seed: int,
         code_sha: str,
         split: SplitName,
+        training_metadata: Mapping[str, Any] | None = None,
     ) -> bool:
         if SplitName(split) is not SplitName.VALIDATION:
             raise PermissionError("checkpoint selection is restricted to validation")
@@ -73,6 +76,8 @@ class CheckpointManager:
             "parameter_count": int(sum(p.numel() for p in model.parameters())),
             "code_sha": str(code_sha),
         }
+        if training_metadata is not None:
+            payload["training_metadata"] = dict(training_metadata)
         destination = self.output_directory / "best.pt"
         temporary = self.output_directory / "best.pt.tmp"
         torch.save(payload, temporary)

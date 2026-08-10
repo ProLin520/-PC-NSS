@@ -3,10 +3,12 @@ import runpy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
 from multisource_doa.config import ExperimentConfig, SplitName
+from multisource_doa.data.dataset import PCNSSDataset
 from multisource_doa.data.simulator import generate_two_source_sample
 from multisource_doa.diagnostics.near_resolution import (
     NearAuditLabel,
@@ -14,6 +16,15 @@ from multisource_doa.diagnostics.near_resolution import (
 )
 from multisource_doa.diagnostics.reporting import write_near_diagnostic_report
 from multisource_doa.models.pc_nss import MultiScalePCNSS
+from multisource_doa.training.error_teacher import build_error_teacher_row
+from multisource_doa.training.single_factor_audit import SingleFactorAuditResult
+from multisource_doa.training.single_factor_reporting import (
+    write_single_factor_audit_report,
+)
+from multisource_doa.training.teacher_cache import (
+    load_teacher_cache,
+    write_teacher_cache,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +35,15 @@ TEACHER_DIAGNOSTIC_SCRIPT = (
 )
 TEACHER_RANKING_SCRIPT = (
     PROJECT_ROOT / "scripts" / "diagnose_pcnss_teacher_ranking.py"
+)
+ERROR_TEACHER_CACHE_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "build_pcnss_failure_aware_teacher_cache.py"
+)
+SINGLE_FACTOR_AUDIT_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "audit_pcnss_teacher_single_factor.py"
+)
+TEACHER_EXPERIMENT_AUDIT_SCRIPT = (
+    PROJECT_ROOT / "scripts" / "audit_pcnss_teacher_experiment.py"
 )
 
 
@@ -191,7 +211,87 @@ class EntrypointTest(unittest.TestCase):
         self.assertFalse(config["allow_locked_test"])
         self.assertFalse(config["overwrite"])
         self.assertEqual(config["evaluation_batch_size"], 128)
+        self.assertEqual(config["teacher_mode"], "physical")
+        self.assertEqual(config["teacher_cache_path"], "")
+        self.assertEqual(config["single_factor_audit_path"], "")
         self.assertNotIn("evaluate_locked_test", namespace["STAGES"])
+
+    def test_failure_aware_training_requires_inputs_before_model_creation(self):
+        namespace = runpy.run_path(str(RUN_SCRIPT))
+        values = dict(
+            namespace["RUN_CONFIG"],
+            stage="train",
+            dry_run=False,
+            teacher_mode="failure_aware_error",
+            teacher_cache_path="",
+            single_factor_audit_path="",
+            output_root="unused",
+        )
+        with mock.patch.object(
+            namespace["MultiScalePCNSS"], "__init__", side_effect=AssertionError
+        ):
+            with self.assertRaises(ValueError):
+                namespace["run_stage"](values)
+
+    def test_physical_teacher_rejects_ambiguous_cache_configuration(self):
+        namespace = runpy.run_path(str(RUN_SCRIPT))
+        with self.assertRaises(ValueError):
+            namespace["_load_teacher_training_context"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "teacher_cache_path": "unexpected",
+                },
+                ExperimentConfig(),
+                expected_count=4,
+            )
+
+    def test_failure_aware_smoke_consumes_authenticated_four_row_cache(self):
+        namespace = runpy.run_path(str(RUN_SCRIPT))
+        config = ExperimentConfig()
+        dataset = PCNSSDataset(SplitName.TRAIN, config)
+        rows = [
+            build_error_teacher_row(dataset[index], sample_index=index)
+            for index in range(4)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache_directory = root / "cache"
+            write_teacher_cache(
+                rows,
+                cache_directory,
+                experiment_config=config,
+                run_config={"device": "cpu", "batch_size": 128},
+                code_sha="smoke",
+                source_sha256={"source.py": "a" * 64},
+                expected_count=4,
+            )
+            cache = load_teacher_cache(cache_directory, config, expected_count=4)
+            audit_directory = root / "audit"
+            write_single_factor_audit_report(
+                SingleFactorAuditResult(
+                    baseline_reuse_allowed=True,
+                    gates={"synthetic_smoke": True},
+                    evidence={"required_action": "reuse_baseline"},
+                    source_sha256={"teacher_cache": dict(cache.file_sha256)},
+                ),
+                audit_directory,
+                run_config={"stage": "smoke"},
+            )
+            result = namespace["run_smoke"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "stage": "smoke_train",
+                    "teacher_mode": "failure_aware_error",
+                    "teacher_cache_path": str(cache_directory),
+                    "single_factor_audit_path": str(audit_directory),
+                    "output_root": str(root / "training_smoke"),
+                }
+            )
+            self.assertEqual(
+                result["training_metadata"]["scale_distillation_target_source"],
+                "train_only_failure_aware_rmspe",
+            )
+            self.assertFalse(result["formal_checkpoint_written"])
 
     def test_stage_parser_rejects_combined_stage_string(self):
         namespace = runpy.run_path(str(RUN_SCRIPT))
@@ -397,6 +497,134 @@ class TeacherRankingEntrypointTest(unittest.TestCase):
             )
             self.assertEqual(manifest["source"], "temporary-train-smoke")
             self.assertNotIn("checkpoint_path", manifest)
+
+
+class ErrorTeacherCacheEntrypointTest(unittest.TestCase):
+    def test_default_is_cpu_train_dry_run_and_creates_nothing(self):
+        namespace = runpy.run_path(str(ERROR_TEACHER_CACHE_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unused"
+            result = namespace["run_stage"](
+                {**namespace["RUN_CONFIG"], "output_root": str(output)}
+            )
+            self.assertEqual(result["stage"], "dry_run")
+            self.assertFalse(result["output_created"])
+            self.assertTrue(result["train_only"])
+            self.assertFalse(result["training_performed"])
+            self.assertFalse(output.exists())
+
+    def test_formal_guards_reject_unsafe_values_and_unknown_keys(self):
+        namespace = runpy.run_path(str(ERROR_TEACHER_CACHE_SCRIPT))
+        base = dict(
+            namespace["RUN_CONFIG"],
+            stage="build_train_teacher_cache",
+            dry_run=False,
+            sample_count=40_000,
+        )
+        for update, error_type in (
+            ({"split": "validation"}, PermissionError),
+            ({"device": "cuda"}, ValueError),
+            ({"sample_count": 39_999}, ValueError),
+            ({"batch_size": 64}, ValueError),
+            ({"overwrite": True}, ValueError),
+            ({"allow_locked_test": True}, PermissionError),
+        ):
+            with self.subTest(update=update), self.assertRaises(error_type):
+                namespace["_validate_safe_config"]({**base, **update}, formal=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"unknown": True}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown config keys"):
+                namespace["load_config"](path)
+
+    def test_four_sample_smoke_writes_authenticated_three_file_cache(self):
+        namespace = runpy.run_path(str(ERROR_TEACHER_CACHE_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cache"
+            result = namespace["run_stage"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "stage": "smoke",
+                    "sample_count": 4,
+                    "output_root": str(output),
+                }
+            )
+            loaded = load_teacher_cache(
+                result["cache"], ExperimentConfig(), expected_count=4
+            )
+            self.assertEqual(len(loaded.labels_by_seed), 4)
+            self.assertEqual(len(list(output.iterdir())), 3)
+
+
+class SingleFactorAuditEntrypointTest(unittest.TestCase):
+    def test_default_reads_nothing_and_creates_nothing(self):
+        namespace = runpy.run_path(str(SINGLE_FACTOR_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unused"
+            result = namespace["run_stage"](
+                {**namespace["RUN_CONFIG"], "output_root": str(output)}
+            )
+            self.assertEqual(result["stage"], "dry_run")
+            self.assertFalse(result["output_created"])
+            self.assertFalse(result["training_performed"])
+            self.assertFalse(output.exists())
+
+    def test_formal_requires_all_sources_and_rejects_unsafe_values(self):
+        namespace = runpy.run_path(str(SINGLE_FACTOR_AUDIT_SCRIPT))
+        base = dict(
+            namespace["RUN_CONFIG"], stage="audit_single_factor", dry_run=False
+        )
+        with self.assertRaises(ValueError):
+            namespace["run_stage"](base)
+        for update, error_type in (
+            ({"device": "cuda"}, ValueError),
+            ({"allow_locked_test": True}, PermissionError),
+            ({"overwrite": True}, ValueError),
+        ):
+            with self.subTest(update=update), self.assertRaises(error_type):
+                namespace["_validate_safe_config"]({**base, **update})
+
+    def test_smoke_writes_three_file_nontraining_report(self):
+        namespace = runpy.run_path(str(SINGLE_FACTOR_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "smoke"
+            result = namespace["run_stage"](
+                {
+                    **namespace["RUN_CONFIG"],
+                    "stage": "smoke",
+                    "output_root": str(output),
+                }
+            )
+            self.assertEqual(len(list(output.iterdir())), 3)
+            self.assertFalse(result["training_performed"])
+
+
+class TeacherExperimentAuditEntrypointTest(unittest.TestCase):
+    def test_default_is_read_free_and_output_free(self):
+        namespace = runpy.run_path(str(TEACHER_EXPERIMENT_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unused"
+            result = namespace["run_stage"]({**namespace["RUN_CONFIG"], "output_root": str(output)})
+            self.assertFalse(result["output_created"])
+            self.assertFalse(result["evaluation_performed"])
+            self.assertFalse(result["training_performed"])
+            self.assertFalse(output.exists())
+
+    def test_formal_requires_four_sources_and_safe_runtime(self):
+        namespace = runpy.run_path(str(TEACHER_EXPERIMENT_AUDIT_SCRIPT))
+        base = {**namespace["RUN_CONFIG"], "stage": "audit_validation_teacher_experiment", "dry_run": False}
+        with self.assertRaises(ValueError): namespace["run_stage"](base)
+        for update, error in (({"split": "development"}, PermissionError), ({"device": "cuda"}, ValueError), ({"allow_locked_test": True}, PermissionError), ({"overwrite": True}, ValueError)):
+            with self.subTest(update=update), self.assertRaises(error): namespace["_validate"]({**base, **update})
+
+    def test_smoke_writes_exact_five_files_without_model_work(self):
+        namespace = runpy.run_path(str(TEACHER_EXPERIMENT_AUDIT_SCRIPT))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "audit"
+            result = namespace["run_stage"]({**namespace["RUN_CONFIG"], "stage": "smoke", "output_root": str(output)})
+            self.assertEqual(len(list(output.iterdir())), 5)
+            self.assertFalse(result["evaluation_performed"])
+            self.assertFalse(result["training_performed"])
 
 
 if __name__ == "__main__":

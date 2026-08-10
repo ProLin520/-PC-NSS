@@ -54,6 +54,19 @@ class SplitAuditTest(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 write_split_manifest(path, self.config, SplitName.TRAIN)
 
+    def test_manifest_optionally_records_training_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "train_manifest.json"
+            metadata = {"teacher_mode": "failure_aware_error"}
+            write_split_manifest(
+                path,
+                self.config,
+                SplitName.TRAIN,
+                extra_metadata=metadata,
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["training_metadata"], metadata)
+
 
 if __name__ == "__main__":
     unittest.main()
